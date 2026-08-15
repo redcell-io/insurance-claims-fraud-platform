@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package orchestration.v1;
+
+import "claims/v1/claims.proto";
+
+option go_package = "claimfraud/proto/gen/go/orchestration/v1;orchestrationv1";
+option java_package = "io.redcell.claimfraud.proto.orchestration.v1";
+option java_multiple_files = true;
+
+// OrchestrationService executes the per-tenant/product/eventType enrichment
+// DAG over a claim event. In the walking skeleton the DAG is hardcoded
+// (one enrichment node: address normalization) rather than loaded from
+// tenant config — see DESIGN.md §6.1 for the real, config-driven version.
+service OrchestrationService {
+  rpc ProcessClaim(ProcessClaimRequest) returns (ProcessClaimResponse);
+}
+
+message ProcessClaimRequest {
+  claims.v1.ClaimEvent claim = 1;
+}
+
+message ProcessClaimResponse {
+  string claim_id = 1;
+  string correlation_id = 2;
+  string status = 3;              // scored | degraded | failed
+  string normalized_address = 4;
+  double fraud_score = 5;
+  string model_version = 6;
+}

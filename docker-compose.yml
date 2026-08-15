@@ -1,0 +1,16 @@
+# Local dev environment for the claim-fraud-platform walking skeleton.
+#
+# Intentionally minimal for now — the skeleton runs the three services
+# directly with `go run` / `mvn spring-boot:run` (see README.md) rather
+# than via Docker, so nothing below is wired up yet. Filled in
+# incrementally as each piece is built:
+#   - claims-gateway, orchestration-service, address-normalization-svc,
+#     model-service as containers (once Dockerfiles exist under infra/docker/)
+#   - kafka + schema registry (once the stub publish becomes real)
+#   - postgres (once Tenant Config Service exists)
+
+services: {}
+
+# networks:
+#   claims-net:
+#     driver: bridge

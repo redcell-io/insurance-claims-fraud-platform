@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package model.v1;
+
+option go_package = "claimfraud/proto/gen/go/model/v1;modelv1";
+option java_package = "io.redcell.claimfraud.proto.model.v1";
+option java_multiple_files = true;
+
+// ModelService performs real-time fraud/risk inference on the feature map
+// assembled by Orchestration from all enrichment nodes. In the walking
+// skeleton this returns a fixed stub score (see DESIGN.md §9 for the real
+// version: ONNX Runtime / TorchServe / Triton backend, hot-swappable
+// model_version per tenant/product).
+service ModelService {
+  rpc Score(ScoreRequest) returns (ScoreResponse);
+}
+
+message ScoreRequest {
+  string correlation_id = 1;
+  map<string, string> features = 2;
+}
+
+message ScoreResponse {
+  double score = 1;
+  string model_version = 2;
+}

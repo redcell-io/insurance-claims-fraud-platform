@@ -1,0 +1,10 @@
+# Normalize line endings for anything text-ish...
+* text=auto
+
+# ...but force LF specifically for shell scripts regardless of the
+# checking-out machine's core.autocrlf setting. This matters here because
+# proto/generate.sh has a `#!/usr/bin/env bash` shebang — if Windows
+# checks it out as CRLF (this dev machine has core.autocrlf=true
+# globally), `./generate.sh` fails with "bad interpreter: ...bash^M: no
+# such file or directory".
+*.sh text eol=lf

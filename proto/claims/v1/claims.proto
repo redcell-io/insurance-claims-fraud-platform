@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package claims.v1;
+
+option go_package = "claimfraud/proto/gen/go/claims/v1;claimsv1";
+option java_package = "io.redcell.claimfraud.proto.claims.v1";
+option java_multiple_files = true;
+
+// ClaimEvent is the canonical representation of an inbound claim event,
+// shared across the real-time and batch flows.
+//
+// tenant_id is deliberately NOT a field here — it travels as gRPC metadata
+// (x-tenant-id), injected by ClaimsGateway and read by every downstream
+// service via interceptor, never carried in the message payload
+// (see DESIGN.md §8).
+message ClaimEvent {
+  string claim_id = 1;
+  string correlation_id = 2;
+  string product = 3;        // auto | home | health
+  string event_type = 4;     // claim.fnol | claim.update | claim.payment_request
+  string policy_number = 5;
+  string claimant_name = 6;
+  string raw_address = 7;
+}

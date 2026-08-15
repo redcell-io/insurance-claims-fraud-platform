@@ -1,0 +1,8 @@
+go 1.25.0
+
+use (
+	./proto/gen/go
+	./services/claims-gateway
+	./services/model-service
+	./services/orchestration-service
+)

@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package addressnorm.v1;
+
+option go_package = "claimfraud/proto/gen/go/addressnorm/v1;addressnormv1";
+option java_package = "io.redcell.claimfraud.proto.addressnorm.v1";
+option java_multiple_files = true;
+
+// AddressNormalizationService is the first enrichment service in the
+// walking skeleton: pure input->output transformation, no encryption or
+// PII hashing, which is why it was picked first (see DESIGN.md discussion
+// on build order).
+service AddressNormalizationService {
+  rpc Normalize(NormalizeRequest) returns (NormalizeResponse);
+}
+
+message NormalizeRequest {
+  string correlation_id = 1;
+  string raw_address = 2;
+}
+
+message NormalizeResponse {
+  string normalized_address = 1;
+  string line1 = 2;
+  string city = 3;
+  string state = 4;
+  string postal_code = 5;
+  string country = 6;
+  bool valid = 7;
+}

@@ -1,0 +1,35 @@
+# Go
+services/*/bin/
+*.exe
+*.test
+
+# Java / Maven
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# Node / React
+node_modules/
+frontend/build/
+frontend/dist/
+
+# Generated protobuf code (regenerate via proto/gen scripts, don't commit)
+proto/gen/
+
+# Downloaded local tooling (portable protoc, etc.)
+tools/protoc/*
+!tools/protoc/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.local
