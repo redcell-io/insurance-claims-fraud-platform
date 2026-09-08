@@ -10,21 +10,29 @@ import (
 
 	claimsv1 "claimfraud/proto/gen/go/claims/v1"
 	orchestrationv1 "claimfraud/proto/gen/go/orchestration/v1"
+	tenantconfigv1 "claimfraud/proto/gen/go/tenantconfig/v1"
 	"claimfraud/services/claims-gateway/internal/client"
 	"claimfraud/services/claims-gateway/internal/correlation"
 )
 
 // hardcodedTenantID stands in for real tenant resolution (API key/JWT →
-// ResolveTenant, see DESIGN.md §8) until the Tenant Config Service exists.
-// Auth, rate limiting, and scope checks are likewise skipped for the
-// walking skeleton — see build-order-plan.
+// ResolveTenant, see DESIGN.md §8) until API-key auth exists. It's now used
+// as a lookup key into a real Tenant Config Service call (see
+// client.TenantConfigClient.GetTenant) rather than assuming an active
+// tenant outright — proves the status-gating path even though "which
+// tenant" is still not client-supplied. Rate limiting and scope checks are
+// still skipped entirely — see build-order-plan.
 const hardcodedTenantID = "acme_insurance"
 
-const orchestrationTimeout = 5 * time.Second
+const (
+	orchestrationTimeout = 5 * time.Second
+	tenantConfigTimeout  = 2 * time.Second
+)
 
 // ClaimsHandler handles the claim-submission REST endpoint and forwards
 // to Orchestration over gRPC.
 type ClaimsHandler struct {
+	TenantConfig  *client.TenantConfigClient
 	Orchestration *client.OrchestrationClient
 }
 
@@ -32,12 +40,12 @@ type ClaimsHandler struct {
 // REST. tenant_id is intentionally absent — it's not a client-supplied
 // field (see hardcodedTenantID above / DESIGN.md §8).
 type claimRequest struct {
-	ClaimID       string `json:"claim_id"`
-	Product       string `json:"product"`
-	EventType     string `json:"event_type"`
-	PolicyNumber  string `json:"policy_number"`
-	ClaimantName  string `json:"claimant_name"`
-	RawAddress    string `json:"raw_address"`
+	ClaimID      string `json:"claim_id"`
+	Product      string `json:"product"`
+	EventType    string `json:"event_type"`
+	PolicyNumber string `json:"policy_number"`
+	ClaimantName string `json:"claimant_name"`
+	RawAddress   string `json:"raw_address"`
 }
 
 type claimResponse struct {
@@ -72,6 +80,21 @@ func (h *ClaimsHandler) SubmitClaim(w http.ResponseWriter, r *http.Request) {
 
 	correlationID := correlation.New()
 
+	// Tenant resolution + status check (DESIGN.md §8 steps 2-3), before
+	// anything downstream runs. Real API-key resolution is still deferred
+	// (see hardcodedTenantID above) but the status gate itself is real.
+	tenantCtx, err := h.resolveTenant(r.Context(), correlationID)
+	if err != nil {
+		log.Printf("correlation_id=%s tenant resolution failed for %s: %v", correlationID, hardcodedTenantID, err)
+		writeError(w, http.StatusForbidden, "tenant not found or unavailable")
+		return
+	}
+	if tenantCtx.GetStatus() != "active" {
+		log.Printf("correlation_id=%s tenant %s not active (status=%s)", correlationID, hardcodedTenantID, tenantCtx.GetStatus())
+		writeError(w, http.StatusForbidden, "tenant is not active")
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), orchestrationTimeout)
 	defer cancel()
 
@@ -101,6 +124,13 @@ func (h *ClaimsHandler) SubmitClaim(w http.ResponseWriter, r *http.Request) {
 		FraudScore:        resp.FraudScore,
 		ModelVersion:      resp.ModelVersion,
 	})
+}
+
+// resolveTenant calls the Tenant Config Service for hardcodedTenantID.
+func (h *ClaimsHandler) resolveTenant(parent context.Context, correlationID string) (*tenantconfigv1.TenantContext, error) {
+	ctx, cancel := context.WithTimeout(parent, tenantConfigTimeout)
+	defer cancel()
+	return h.TenantConfig.GetTenant(ctx, hardcodedTenantID)
 }
 
 func Healthz(w http.ResponseWriter, r *http.Request) {

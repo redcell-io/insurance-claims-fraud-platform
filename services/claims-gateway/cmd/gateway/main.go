@@ -18,6 +18,13 @@ import (
 func main() {
 	httpAddr := getenv("GATEWAY_HTTP_ADDR", ":8080")
 	orchestrationAddr := getenv("ORCHESTRATION_ADDR", "localhost:9091")
+	tenantConfigAddr := getenv("TENANT_CONFIG_ADDR", "localhost:9094")
+
+	tenantConfig, err := client.DialTenantConfig(tenantConfigAddr)
+	if err != nil {
+		log.Fatalf("dial tenant-config-svc at %s: %v", tenantConfigAddr, err)
+	}
+	defer tenantConfig.Close()
 
 	orchestration, err := client.DialOrchestration(orchestrationAddr)
 	if err != nil {
@@ -25,13 +32,13 @@ func main() {
 	}
 	defer orchestration.Close()
 
-	h := &handler.ClaimsHandler{Orchestration: orchestration}
+	h := &handler.ClaimsHandler{TenantConfig: tenantConfig, Orchestration: orchestration}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/claims", h.SubmitClaim)
 	mux.HandleFunc("/healthz", handler.Healthz)
 
-	log.Printf("claims-gateway listening on %s, forwarding to orchestration at %s", httpAddr, orchestrationAddr)
+	log.Printf("claims-gateway listening on %s, forwarding to orchestration at %s (tenant-config at %s)", httpAddr, orchestrationAddr, tenantConfigAddr)
 	if err := http.ListenAndServe(httpAddr, mux); err != nil {
 		log.Fatalf("claims-gateway server failed: %v", err)
 	}

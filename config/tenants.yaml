@@ -1,0 +1,20 @@
+# Tenant data served by tenant-config-svc (DESIGN.md §7, thin slice — see
+# services/tenant-config-svc/internal/store for what's deferred: Postgres,
+# transactional outbox, Kafka cache invalidation).
+#
+# Two tenants on purpose: acme_insurance (active) reproduces the original
+# walking-skeleton behavior exactly; globex_insurance (suspended) exists
+# solely to exercise ClaimsGateway's 403 status-gating path for real,
+# rather than just having the code path exist untested.
+tenants:
+  - tenant_id: acme_insurance
+    display_name: "Acme Insurance Co"
+    status: active
+    dag_versions:
+      auto: 1
+
+  - tenant_id: globex_insurance
+    display_name: "Globex Insurance Co"
+    status: suspended
+    dag_versions:
+      auto: 1

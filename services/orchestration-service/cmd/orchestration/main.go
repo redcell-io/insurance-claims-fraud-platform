@@ -23,6 +23,14 @@ func main() {
 	grpcAddr := getenv("ORCHESTRATION_GRPC_ADDR", ":9091")
 	addressNormAddr := getenv("ADDRESS_NORMALIZATION_ADDR", "localhost:9092")
 	modelAddr := getenv("MODEL_SERVICE_ADDR", "localhost:9093")
+	tenantConfigAddr := getenv("TENANT_CONFIG_ADDR", "localhost:9094")
+	dagConfigDir := getenv("DAG_CONFIG_DIR", "../../config/dag")
+
+	tenantConfig, err := client.DialTenantConfig(tenantConfigAddr)
+	if err != nil {
+		log.Fatalf("dial tenant-config-svc at %s: %v", tenantConfigAddr, err)
+	}
+	defer tenantConfig.Close()
 
 	addressNorm, err := client.DialAddressNorm(addressNormAddr)
 	if err != nil {
@@ -38,6 +46,10 @@ func main() {
 
 	srv := &server.Server{
 		Executor: &dag.Executor{
+			Loader: &dag.Loader{
+				TenantConfig: tenantConfig,
+				ConfigDir:    dagConfigDir,
+			},
 			AddressNorm: addressNorm,
 			Model:       model,
 		},
@@ -51,7 +63,8 @@ func main() {
 	grpcServer := grpc.NewServer()
 	orchestrationv1.RegisterOrchestrationServiceServer(grpcServer, srv)
 
-	log.Printf("orchestration-service listening on %s (address-norm=%s, model=%s)", grpcAddr, addressNormAddr, modelAddr)
+	log.Printf("orchestration-service listening on %s (address-norm=%s, model=%s, tenant-config=%s, dag-config-dir=%s)",
+		grpcAddr, addressNormAddr, modelAddr, tenantConfigAddr, dagConfigDir)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("orchestration-service server failed: %v", err)
 	}

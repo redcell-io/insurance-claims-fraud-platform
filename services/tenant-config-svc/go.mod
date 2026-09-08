@@ -1,4 +1,4 @@
-module claimfraud/services/orchestration-service
+module claimfraud/services/tenant-config-svc
 
 go 1.25.0
 

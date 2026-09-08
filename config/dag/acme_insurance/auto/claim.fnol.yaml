@@ -1,0 +1,27 @@
+# DAG config for (tenant=acme_insurance, product=auto, event_type=claim.fnol),
+# read by Orchestration Service (see internal/dag/loader.go). Shape follows
+# DESIGN.md §6.1 exactly, trimmed to the nodes this repo has real services
+# for. Reproduces the original hardcoded skeleton.go sequence:
+#   address_normalize (on_failure: skip) -> model_score (default: fail_fast)
+#   -> publish (stub, logs only)
+tenant_id: acme_insurance
+product: auto
+event_type: claim.fnol
+version: 1
+timeout_ms: 250
+
+nodes:
+  - id: address_normalize
+    service: address-normalization-svc
+    group: enrichment
+    timeout_ms: 40
+    on_failure: skip
+
+  - id: model_score
+    service: model-service
+    depends_on: [enrichment]
+    timeout_ms: 80
+
+  - id: publish
+    service: kafka-publisher
+    depends_on: [model_score]

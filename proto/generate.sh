@@ -22,6 +22,7 @@ PROTOC="tools/protoc/bin/protoc.exe"
   proto/claims/v1/claims.proto \
   proto/orchestration/v1/orchestration.proto \
   proto/addressnorm/v1/address_normalization.proto \
-  proto/model/v1/model.proto
+  proto/model/v1/model.proto \
+  proto/tenantconfig/v1/tenant_config.proto
 
 echo "Generated Go stubs into proto/gen/go/"

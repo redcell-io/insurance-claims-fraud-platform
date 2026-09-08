@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package tenantconfig.v1;
+
+option go_package = "claimfraud/proto/gen/go/tenantconfig/v1;tenantconfigv1";
+option java_package = "io.redcell.claimfraud.proto.tenantconfig.v1";
+option java_multiple_files = true;
+
+// TenantConfigService is the single source of truth for tenant-specific
+// data needed on the hot path (DESIGN.md §7). This is a thin slice of that
+// design: tenants are loaded from a local YAML file at startup (no
+// Postgres, no transactional outbox, no Kafka cache-invalidation events —
+// restart to pick up changes), and there is no per-caller TTL caching yet.
+service TenantConfigService {
+  // GetTenant stands in for the real ResolveTenant(api_key_hash) — see
+  // DESIGN.md §7 — until API-key auth exists. ClaimsGateway still resolves
+  // "which tenant" via a hardcoded default id rather than a client-supplied
+  // credential, but now asks this service for that tenant's real status
+  // instead of assuming active.
+  rpc GetTenant(GetTenantRequest) returns (TenantContext);
+
+  // GetDagVersion resolves which DAG config version Orchestration should
+  // load for a given tenant/product (DESIGN.md §6.1's
+  // `dag_config_ref.product_overrides`).
+  rpc GetDagVersion(GetDagVersionRequest) returns (GetDagVersionResponse);
+}
+
+message GetTenantRequest {
+  string tenant_id = 1;
+}
+
+message TenantContext {
+  string tenant_id = 1;
+  string display_name = 2;
+  string status = 3; // active | suspended | onboarding
+}
+
+message GetDagVersionRequest {
+  string tenant_id = 1;
+  string product = 2;
+}
+
+message GetDagVersionResponse {
+  int32 version = 1;
+}
