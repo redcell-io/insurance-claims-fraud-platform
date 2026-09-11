@@ -8,14 +8,24 @@ import (
 	claimsv1 "claimfraud/proto/gen/go/claims/v1"
 
 	addressnormv1 "claimfraud/proto/gen/go/addressnorm/v1"
+	claimantidhashv1 "claimfraud/proto/gen/go/claimantidhash/v1"
 	modelv1 "claimfraud/proto/gen/go/model/v1"
+	policylookupv1 "claimfraud/proto/gen/go/policylookup/v1"
 )
 
-// AddressNormalizer and Scorer are the narrow interfaces the executor needs
-// from its downstream clients, so it can be tested without a live gRPC
-// connection.
+// AddressNormalizer, ClaimantIDHasher, PolicyLookuper, and Scorer are the
+// narrow interfaces the executor needs from its downstream clients, so it
+// can be tested without a live gRPC connection.
 type AddressNormalizer interface {
 	Normalize(ctx context.Context, correlationID, rawAddress string) (*addressnormv1.NormalizeResponse, error)
+}
+
+type ClaimantIDHasher interface {
+	Hash(ctx context.Context, correlationID, claimantName string) (*claimantidhashv1.HashClaimantIdResponse, error)
+}
+
+type PolicyLookuper interface {
+	Lookup(ctx context.Context, correlationID, policyNumber string) (*policylookupv1.LookupPolicyResponse, error)
 }
 
 type Scorer interface {
@@ -45,14 +55,16 @@ type ConfigLoader interface {
 // concurrently... today sequentially, since there's only one), then nodes
 // depending on that group ("model_score"), then nodes depending on
 // model_score ("publish"). That's sufficient for every DAG this repo has
-// today, including layer 2b's planned claimant_id_hash/policy_lookup (they
-// join the enrichment group; they don't depend on each other). A real
-// topo-sort is deferred until a DAG actually needs multi-level dependencies
-// beyond this shape.
+// today: claimant_id_hash/address_normalize/policy_lookup all join the
+// enrichment group; none depend on each other. A real topo-sort is
+// deferred until a DAG actually needs multi-level dependencies beyond this
+// shape.
 type Executor struct {
-	Loader      ConfigLoader
-	AddressNorm AddressNormalizer
-	Model       Scorer
+	Loader         ConfigLoader
+	AddressNorm    AddressNormalizer
+	ClaimantIDHash ClaimantIDHasher
+	PolicyLookup   PolicyLookuper
+	Model          Scorer
 }
 
 const groupEnrichment = "enrichment"
@@ -66,6 +78,9 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 
 	status := "scored"
 	normalizedAddress := claim.GetRawAddress()
+	claimantIDHash := ""
+	policyStatus := ""
+	policyCoverageType := ""
 
 	// Stage 1: enrichment group — nodes with no depends_on.
 	for _, node := range cfg.Nodes {
@@ -73,6 +88,16 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 			continue
 		}
 		switch node.Service {
+		case "claimant-id-hashing-svc":
+			hashResp, err := e.ClaimantIDHash.Hash(ctx, correlationID, claim.GetClaimantName())
+			if err != nil {
+				if !nodeFailureHandled(node, correlationID, err) {
+					return nil, err
+				}
+				status = "degraded"
+				continue
+			}
+			claimantIDHash = hashResp.GetClaimantIdHash()
 		case "address-normalization-svc":
 			normResp, err := e.AddressNorm.Normalize(ctx, correlationID, claim.GetRawAddress())
 			if err != nil {
@@ -83,6 +108,21 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 				continue
 			}
 			normalizedAddress = normResp.GetNormalizedAddress()
+		case "policy-lookup-svc":
+			// found=false is a normal business result (unknown policy
+			// number), not a call failure — on_failure only applies to the
+			// RPC itself erroring out, so this doesn't go through
+			// nodeFailureHandled.
+			lookupResp, err := e.PolicyLookup.Lookup(ctx, correlationID, claim.GetPolicyNumber())
+			if err != nil {
+				if !nodeFailureHandled(node, correlationID, err) {
+					return nil, err
+				}
+				status = "degraded"
+				continue
+			}
+			policyStatus = lookupResp.GetStatus()
+			policyCoverageType = lookupResp.GetCoverageType()
 		default:
 			log.Printf("correlation_id=%s dag node=%s: unrecognized service %q, skipping", correlationID, node.ID, node.Service)
 		}
@@ -96,13 +136,19 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 		}
 		switch node.Service {
 		case "model-service":
+			// claimant_id_hash replaces raw claimant_name entirely here —
+			// once claimant_id_hash succeeds (it's on_failure: fail_fast,
+			// so reaching this point guarantees it did), there's no reason
+			// for raw PII to travel any further downstream (DECISIONS.md).
 			features := map[string]string{
-				"tenant_id":          tenantID,
-				"product":            claim.GetProduct(),
-				"event_type":         claim.GetEventType(),
-				"policy_number":      claim.GetPolicyNumber(),
-				"claimant_name":      claim.GetClaimantName(),
-				"normalized_address": normalizedAddress,
+				"tenant_id":            tenantID,
+				"product":              claim.GetProduct(),
+				"event_type":           claim.GetEventType(),
+				"policy_number":        claim.GetPolicyNumber(),
+				"claimant_id_hash":     claimantIDHash,
+				"normalized_address":   normalizedAddress,
+				"policy_status":        policyStatus,
+				"policy_coverage_type": policyCoverageType,
 			}
 			resp, err := e.Model.Score(ctx, correlationID, features)
 			if err != nil {

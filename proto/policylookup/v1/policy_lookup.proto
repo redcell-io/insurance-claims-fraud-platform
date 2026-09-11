@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package policylookup.v1;
+
+option go_package = "claimfraud/proto/gen/go/policylookup/v1;policylookupv1";
+option java_package = "io.redcell.claimfraud.proto.policylookup.v1";
+option java_multiple_files = true;
+
+// PolicyLookupService resolves a policy number to coverage details
+// (DESIGN.md §4 item 5). Thin slice: fixture-backed, in-memory known
+// policies — no real policy-admin-system integration yet.
+service PolicyLookupService {
+  rpc LookupPolicy(LookupPolicyRequest) returns (LookupPolicyResponse);
+}
+
+message LookupPolicyRequest {
+  string correlation_id = 1;
+  string policy_number = 2;
+}
+
+message LookupPolicyResponse {
+  bool found = 1;
+  string status = 2;         // active | lapsed | cancelled | unknown
+  string coverage_type = 3;  // e.g. full | liability_only
+}

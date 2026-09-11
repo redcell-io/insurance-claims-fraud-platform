@@ -1,0 +1,10 @@
+spring:
+  application:
+    name: policy-lookup-svc
+
+# Custom property (not Spring's own grpc.* namespace) — read by
+# GrpcServerLifecycle. Default 9096 matches POLICY_LOOKUP_ADDR's default
+# in orchestration-service.
+app:
+  grpc:
+    port: 9096

@@ -24,6 +24,8 @@ func main() {
 	addressNormAddr := getenv("ADDRESS_NORMALIZATION_ADDR", "localhost:9092")
 	modelAddr := getenv("MODEL_SERVICE_ADDR", "localhost:9093")
 	tenantConfigAddr := getenv("TENANT_CONFIG_ADDR", "localhost:9094")
+	claimantIDHashAddr := getenv("CLAIMANT_ID_HASHING_ADDR", "localhost:9095")
+	policyLookupAddr := getenv("POLICY_LOOKUP_ADDR", "localhost:9096")
 	dagConfigDir := getenv("DAG_CONFIG_DIR", "../../config/dag")
 
 	tenantConfig, err := client.DialTenantConfig(tenantConfigAddr)
@@ -38,6 +40,18 @@ func main() {
 	}
 	defer addressNorm.Close()
 
+	claimantIDHash, err := client.DialClaimantIDHash(claimantIDHashAddr)
+	if err != nil {
+		log.Fatalf("dial claimant-id-hashing-svc at %s: %v", claimantIDHashAddr, err)
+	}
+	defer claimantIDHash.Close()
+
+	policyLookup, err := client.DialPolicyLookup(policyLookupAddr)
+	if err != nil {
+		log.Fatalf("dial policy-lookup-svc at %s: %v", policyLookupAddr, err)
+	}
+	defer policyLookup.Close()
+
 	model, err := client.DialModel(modelAddr)
 	if err != nil {
 		log.Fatalf("dial model-service at %s: %v", modelAddr, err)
@@ -50,8 +64,10 @@ func main() {
 				TenantConfig: tenantConfig,
 				ConfigDir:    dagConfigDir,
 			},
-			AddressNorm: addressNorm,
-			Model:       model,
+			AddressNorm:    addressNorm,
+			ClaimantIDHash: claimantIDHash,
+			PolicyLookup:   policyLookup,
+			Model:          model,
 		},
 	}
 
@@ -63,8 +79,8 @@ func main() {
 	grpcServer := grpc.NewServer()
 	orchestrationv1.RegisterOrchestrationServiceServer(grpcServer, srv)
 
-	log.Printf("orchestration-service listening on %s (address-norm=%s, model=%s, tenant-config=%s, dag-config-dir=%s)",
-		grpcAddr, addressNormAddr, modelAddr, tenantConfigAddr, dagConfigDir)
+	log.Printf("orchestration-service listening on %s (address-norm=%s, claimant-id-hash=%s, policy-lookup=%s, model=%s, tenant-config=%s, dag-config-dir=%s)",
+		grpcAddr, addressNormAddr, claimantIDHashAddr, policyLookupAddr, modelAddr, tenantConfigAddr, dagConfigDir)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("orchestration-service server failed: %v", err)
 	}

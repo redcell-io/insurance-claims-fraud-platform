@@ -1,21 +1,35 @@
 # DAG config for (tenant=acme_insurance, product=auto, event_type=claim.fnol),
 # read by Orchestration Service (see internal/dag/loader.go). Shape follows
-# DESIGN.md §6.1 exactly, trimmed to the nodes this repo has real services
-# for. Reproduces the original hardcoded skeleton.go sequence:
-#   address_normalize (on_failure: skip) -> model_score (default: fail_fast)
-#   -> publish (stub, logs only)
+# DESIGN.md §6.1 exactly.
+#
+# v2: added claimant_id_hash and policy_lookup to the enrichment group
+# (remaining enrichment services, DESIGN.md §4 items 3/5) — both join the
+# existing group unchanged, per DECISIONS.md #10 (staged executor, no
+# depends_on changes needed). v1 had only address_normalize.
 tenant_id: acme_insurance
 product: auto
 event_type: claim.fnol
-version: 1
+version: 2
 timeout_ms: 250
 
 nodes:
+  - id: claimant_id_hash
+    service: claimant-id-hashing-svc
+    group: enrichment
+    timeout_ms: 40
+    on_failure: fail_fast
+
   - id: address_normalize
     service: address-normalization-svc
     group: enrichment
     timeout_ms: 40
     on_failure: skip
+
+  - id: policy_lookup
+    service: policy-lookup-svc
+    group: enrichment
+    timeout_ms: 40
+    on_failure: degrade
 
   - id: model_score
     service: model-service

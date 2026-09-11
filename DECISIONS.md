@@ -165,3 +165,52 @@ building it now would be solving a problem this repo doesn't have yet.
 sources of truth read by multiple services (tenant-config-svc reads
 `tenants.yaml`; Orchestration reads the DAG YAML directly from disk), so
 neither belongs inside any one service's directory.
+
+## 12. Claimant ID Hashing uses a static salt, not per-tenant KMS keys
+
+**Decision:** `ClaimantIdHasher` (claimant-id-hashing-svc) hashes
+`claimant_name` with SHA-256 and one static salt baked into the binary,
+not a per-tenant key derived from KMS.
+
+**Why:** #1/#8's reasoning again — this proves the actual contract that
+matters (raw PII never reaches Model Service or Kafka; claims from the same
+claimant hash identically for fraud-pattern matching) without first
+building KMS integration, which is a meaningful chunk of infrastructure
+(DESIGN.md §12) orthogonal to whether the hashing *behavior* is correct.
+Also: `claims.v1.ClaimEvent` doesn't carry a richer PII identifier
+(SSN/DOB) yet — `claimant_name` is what's available, and is itself
+case/whitespace-normalized before hashing so `"Jane Doe"` and `"jane doe"`
+resolve to the same claimant.
+
+**Deferred:** per-tenant KMS-derived salts/keys, a real PII identifier
+field in `ClaimEvent`.
+
+## 13. Policy Lookup is fixture-backed, not a real policy-system integration
+
+**Decision:** `PolicyLookup` (policy-lookup-svc) resolves `policy_number`
+against a small hardcoded `Map` of known policies, not a call to a real
+policy-admin system.
+
+**Why:** same reasoning as Model Service's stub (#3) and Tenant Config
+Service's local-YAML store (#8) — proves the enrichment contract (a
+found/not-found policy, status, coverage type feeding the model's feature
+map) without a policy-admin-system integration that doesn't exist yet in
+this portfolio project. `on_failure: degrade` (not `fail_fast`) reflects
+that a missing/unknown policy is a legitimate, expected outcome, not
+grounds to abort the claim.
+
+## 14. Model Service features carry the claimant hash, never raw PII
+
+**Decision:** once `claimant_id_hash` succeeds, the feature map
+Orchestration sends to Model Service uses `claimant_id_hash` — raw
+`claimant_name` is dropped from the outgoing feature map entirely, not
+merely supplemented by the hash.
+
+**Why:** the entire point of hashing the claimant identifier (DESIGN.md §4
+item 3) is keeping raw PII from propagating past the one service that's
+supposed to touch it. Sending both the hash *and* the raw name downstream
+would defeat that. This is safe specifically because `claimant_id_hash`'s
+`on_failure` is `fail_fast` (DESIGN.md §6.1's example) — by the time
+Orchestration reaches the feature-map-building stage, the hash is
+guaranteed to exist, so there's no case where raw PII is the only thing
+available to send.

@@ -6,8 +6,10 @@ import (
 	"testing"
 
 	addressnormv1 "claimfraud/proto/gen/go/addressnorm/v1"
+	claimantidhashv1 "claimfraud/proto/gen/go/claimantidhash/v1"
 	claimsv1 "claimfraud/proto/gen/go/claims/v1"
 	modelv1 "claimfraud/proto/gen/go/model/v1"
+	policylookupv1 "claimfraud/proto/gen/go/policylookup/v1"
 )
 
 type fakeConfigLoader struct {
@@ -30,6 +32,28 @@ func (f *fakeAddressNorm) Normalize(ctx context.Context, correlationID, rawAddre
 	return f.resp, f.err
 }
 
+type fakeClaimantIDHasher struct {
+	resp   *claimantidhashv1.HashClaimantIdResponse
+	err    error
+	called bool
+}
+
+func (f *fakeClaimantIDHasher) Hash(ctx context.Context, correlationID, claimantName string) (*claimantidhashv1.HashClaimantIdResponse, error) {
+	f.called = true
+	return f.resp, f.err
+}
+
+type fakePolicyLookup struct {
+	resp   *policylookupv1.LookupPolicyResponse
+	err    error
+	called bool
+}
+
+func (f *fakePolicyLookup) Lookup(ctx context.Context, correlationID, policyNumber string) (*policylookupv1.LookupPolicyResponse, error) {
+	f.called = true
+	return f.resp, f.err
+}
+
 type fakeScorer struct {
 	resp *modelv1.ScoreResponse
 	err  error
@@ -40,29 +64,58 @@ func (f *fakeScorer) Score(ctx context.Context, correlationID string, features m
 }
 
 // testConfig reproduces config/dag/acme_insurance/auto/claim.fnol.yaml's
-// shape: address_normalize (skip) -> model_score (default fail_fast) ->
-// publish.
+// v2 shape: claimant_id_hash (fail_fast) + address_normalize (skip) +
+// policy_lookup (degrade) [enrichment group] -> model_score (default
+// fail_fast) -> publish.
 func testConfig() *Config {
 	return &Config{
 		TenantID:  "acme_insurance",
 		Product:   "auto",
 		EventType: "claim.fnol",
-		Version:   1,
+		Version:   2,
 		Nodes: []Node{
+			{ID: "claimant_id_hash", Service: "claimant-id-hashing-svc", Group: groupEnrichment, OnFailure: OnFailureFailFast},
 			{ID: "address_normalize", Service: "address-normalization-svc", Group: groupEnrichment, OnFailure: OnFailureSkip},
+			{ID: "policy_lookup", Service: "policy-lookup-svc", Group: groupEnrichment, OnFailure: OnFailureDegrade},
 			{ID: "model_score", Service: "model-service", DependsOn: []string{groupEnrichment}},
 			{ID: "publish", Service: "kafka-publisher", DependsOn: []string{nodeModelScore}},
 		},
 	}
 }
 
+// nodeByID finds a node by id, failing the test if it's not present —
+// keeps tests resilient to reordering testConfig()'s node list.
+func nodeByID(t *testing.T, cfg *Config, id string) *Node {
+	t.Helper()
+	for i := range cfg.Nodes {
+		if cfg.Nodes[i].ID == id {
+			return &cfg.Nodes[i]
+		}
+	}
+	t.Fatalf("no node with id %q in testConfig()", id)
+	return nil
+}
+
+// successfulClaimantIDHash and successfulPolicyLookup are the default
+// "everything upstream worked" fakes, for tests that aren't specifically
+// exercising those two nodes.
+func successfulClaimantIDHash() *fakeClaimantIDHasher {
+	return &fakeClaimantIDHasher{resp: &claimantidhashv1.HashClaimantIdResponse{ClaimantIdHash: "deadbeef"}}
+}
+
+func successfulPolicyLookup() *fakePolicyLookup {
+	return &fakePolicyLookup{resp: &policylookupv1.LookupPolicyResponse{Found: true, Status: "active", CoverageType: "full"}}
+}
+
 func TestExecutorRunHappyPath(t *testing.T) {
 	e := &Executor{
-		Loader:      &fakeConfigLoader{cfg: testConfig()},
-		AddressNorm: &fakeAddressNorm{resp: &addressnormv1.NormalizeResponse{NormalizedAddress: "123 MAIN ST"}},
-		Model:       &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.42, ModelVersion: "stub-v0"}},
+		Loader:         &fakeConfigLoader{cfg: testConfig()},
+		AddressNorm:    &fakeAddressNorm{resp: &addressnormv1.NormalizeResponse{NormalizedAddress: "123 MAIN ST"}},
+		ClaimantIDHash: successfulClaimantIDHash(),
+		PolicyLookup:   successfulPolicyLookup(),
+		Model:          &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.42, ModelVersion: "stub-v0"}},
 	}
-	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol", RawAddress: "raw"}
+	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol", RawAddress: "raw", ClaimantName: "Jane Doe", PolicyNumber: "POL-123456"}
 
 	result, err := e.Run(context.Background(), "acme_insurance", "corr-1", claim)
 	if err != nil {
@@ -84,9 +137,11 @@ func TestExecutorRunHappyPath(t *testing.T) {
 
 func TestExecutorRunAddressNormalizeFailureDegradesWithSkipPolicy(t *testing.T) {
 	e := &Executor{
-		Loader:      &fakeConfigLoader{cfg: testConfig()},
-		AddressNorm: &fakeAddressNorm{err: errors.New("address-norm unavailable")},
-		Model:       &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.5, ModelVersion: "v1"}},
+		Loader:         &fakeConfigLoader{cfg: testConfig()},
+		AddressNorm:    &fakeAddressNorm{err: errors.New("address-norm unavailable")},
+		ClaimantIDHash: successfulClaimantIDHash(),
+		PolicyLookup:   successfulPolicyLookup(),
+		Model:          &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.5, ModelVersion: "v1"}},
 	}
 	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol", RawAddress: "raw address"}
 
@@ -104,9 +159,11 @@ func TestExecutorRunAddressNormalizeFailureDegradesWithSkipPolicy(t *testing.T) 
 
 func TestExecutorRunModelScoreFailureFailsFastByDefault(t *testing.T) {
 	e := &Executor{
-		Loader:      &fakeConfigLoader{cfg: testConfig()},
-		AddressNorm: &fakeAddressNorm{resp: &addressnormv1.NormalizeResponse{NormalizedAddress: "x"}},
-		Model:       &fakeScorer{err: errors.New("model-service unavailable")},
+		Loader:         &fakeConfigLoader{cfg: testConfig()},
+		AddressNorm:    &fakeAddressNorm{resp: &addressnormv1.NormalizeResponse{NormalizedAddress: "x"}},
+		ClaimantIDHash: successfulClaimantIDHash(),
+		PolicyLookup:   successfulPolicyLookup(),
+		Model:          &fakeScorer{err: errors.New("model-service unavailable")},
 	}
 	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol"}
 
@@ -116,15 +173,54 @@ func TestExecutorRunModelScoreFailureFailsFastByDefault(t *testing.T) {
 	}
 }
 
+func TestExecutorRunClaimantIdHashFailureFailsFast(t *testing.T) {
+	e := &Executor{
+		Loader:         &fakeConfigLoader{cfg: testConfig()},
+		AddressNorm:    &fakeAddressNorm{resp: &addressnormv1.NormalizeResponse{NormalizedAddress: "x"}},
+		ClaimantIDHash: &fakeClaimantIDHasher{err: errors.New("claimant-id-hashing-svc unavailable")},
+		PolicyLookup:   successfulPolicyLookup(),
+		Model:          &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.1, ModelVersion: "v1"}},
+	}
+	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol"}
+
+	_, err := e.Run(context.Background(), "acme_insurance", "corr-5", claim)
+	if err == nil {
+		t.Fatal("Run() error = nil, want non-nil (claimant_id_hash is on_failure: fail_fast)")
+	}
+}
+
+func TestExecutorRunPolicyNotFoundStillScores(t *testing.T) {
+	e := &Executor{
+		Loader:         &fakeConfigLoader{cfg: testConfig()},
+		AddressNorm:    &fakeAddressNorm{resp: &addressnormv1.NormalizeResponse{NormalizedAddress: "x"}},
+		ClaimantIDHash: successfulClaimantIDHash(),
+		// found=false is a normal business result, not an RPC error — the
+		// call itself succeeds.
+		PolicyLookup: &fakePolicyLookup{resp: &policylookupv1.LookupPolicyResponse{Found: false, Status: "unknown"}},
+		Model:        &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.9, ModelVersion: "v1"}},
+	}
+	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol", PolicyNumber: "POL-DOES-NOT-EXIST"}
+
+	result, err := e.Run(context.Background(), "acme_insurance", "corr-6", claim)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil (found=false is not a call failure)", err)
+	}
+	if result.Status != "scored" {
+		t.Errorf("Status = %q, want %q (an unknown policy number is not a degrade condition)", result.Status, "scored")
+	}
+}
+
 func TestExecutorRunSkipsNodeNotEnabledForTenant(t *testing.T) {
 	cfg := testConfig()
-	cfg.Nodes[0].EnabledFor = []string{"other_tenant"} // address_normalize gated out for acme_insurance
+	nodeByID(t, cfg, "address_normalize").EnabledFor = []string{"other_tenant"} // gated out for acme_insurance
 
 	fakeNorm := &fakeAddressNorm{resp: &addressnormv1.NormalizeResponse{NormalizedAddress: "should not be used"}}
 	e := &Executor{
-		Loader:      &fakeConfigLoader{cfg: cfg},
-		AddressNorm: fakeNorm,
-		Model:       &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.1, ModelVersion: "v1"}},
+		Loader:         &fakeConfigLoader{cfg: cfg},
+		AddressNorm:    fakeNorm,
+		ClaimantIDHash: successfulClaimantIDHash(),
+		PolicyLookup:   successfulPolicyLookup(),
+		Model:          &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.1, ModelVersion: "v1"}},
 	}
 	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol", RawAddress: "untouched raw address"}
 

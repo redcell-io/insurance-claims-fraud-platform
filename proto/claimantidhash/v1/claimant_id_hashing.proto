@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package claimantidhash.v1;
+
+option go_package = "claimfraud/proto/gen/go/claimantidhash/v1;claimantidhashv1";
+option java_package = "io.redcell.claimfraud.proto.claimantidhash.v1";
+option java_multiple_files = true;
+
+// ClaimantIdHashingService hashes PII identifiers so claims can be linked
+// to the same claimant across submissions without carrying raw PII
+// downstream to Model Service / Kafka (DESIGN.md §4 item 3, §12).
+//
+// Thin slice: SHA-256 + a static salt, not per-tenant KMS-derived keys —
+// proves the hash-not-raw-PII contract without building KMS integration
+// yet (see DECISIONS.md).
+service ClaimantIdHashingService {
+  rpc HashClaimantId(HashClaimantIdRequest) returns (HashClaimantIdResponse);
+}
+
+message HashClaimantIdRequest {
+  string correlation_id = 1;
+  // Stand-in identifying field — claims.v1.ClaimEvent doesn't carry a
+  // richer PII identifier (SSN/DOB) yet, so claimant_name is what's
+  // available to hash.
+  string claimant_name = 2;
+}
+
+message HashClaimantIdResponse {
+  string claimant_id_hash = 1;
+}

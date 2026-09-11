@@ -8,7 +8,9 @@ history or a commit message.
 For *why* it's built this way, see [DESIGN.md](DESIGN.md) (target
 architecture) and [DECISIONS.md](DECISIONS.md) (build decisions +
 rationale). For *what calls what*, see
-[docs/dag-request-flow.md](docs/dag-request-flow.md).
+[docs/dag-request-flow.md](docs/dag-request-flow.md). For a reusable,
+re-runnable set of REST/gRPC test cases (per-endpoint request/response/
+expected-result), see [docs/manual-test-cases.md](docs/manual-test-cases.md).
 
 ## Prerequisites
 
@@ -61,16 +63,17 @@ cd services/orchestration-service
 go test ./... -v
 ```
 
-**Java** — `address-normalization-svc`'s pure normalization logic:
+**Java** — pure logic in each enrichment service:
 
 ```sh
-cd services/address-normalization-svc
-mvn test
+cd services/address-normalization-svc && mvn test
+cd ../claimant-id-hashing-svc && mvn test
+cd ../policy-lookup-svc && mvn test
 ```
 
 ## 4. Run the full stack
 
-Five processes, each in its own terminal, **in this order** —
+Seven processes, each in its own terminal, **in this order** —
 tenant-config-svc first, since both ClaimsGateway and Orchestration depend
 on it (each service dials its downstream addresses lazily, so a couple
 seconds' head start is enough, it doesn't have to be exact):
@@ -82,19 +85,27 @@ cd services/tenant-config-svc && go run ./cmd/tenantconfig
 # 2. Model Service (Go stub) — gRPC :9093
 cd services/model-service && go run ./cmd/model
 
-# 3. Address Normalization (Java 25 / Spring Boot) — gRPC :9092
+# 3. Claimant ID Hashing (Java 25 / Spring Boot) — gRPC :9095
+cd services/claimant-id-hashing-svc && mvn spring-boot:run
+
+# 4. Address Normalization (Java 25 / Spring Boot) — gRPC :9092
 cd services/address-normalization-svc && mvn spring-boot:run
 
-# 4. Orchestration Service (Go) — gRPC :9091, calls #1, #2, #3
+# 5. Policy Lookup (Java 25 / Spring Boot) — gRPC :9096
+cd services/policy-lookup-svc && mvn spring-boot:run
+
+# 6. Orchestration Service (Go) — gRPC :9091, calls #1-#5
 cd services/orchestration-service && go run ./cmd/orchestration
 
-# 5. ClaimsGateway (Go) — REST :8080, calls #1 and #4
+# 7. ClaimsGateway (Go) — REST :8080, calls #1 and #6
 cd services/claims-gateway && go run ./cmd/gateway
 ```
 
 Ports and downstream addresses are configurable via env vars
 (`TENANT_CONFIG_ADDR`/`TENANT_CONFIG_GRPC_ADDR`, `MODEL_GRPC_ADDR`,
 `ADDRESS_NORMALIZATION_ADDR`/`app.grpc.port`,
+`CLAIMANT_ID_HASHING_ADDR`/`app.grpc.port`,
+`POLICY_LOOKUP_ADDR`/`app.grpc.port`,
 `ORCHESTRATION_GRPC_ADDR`/`ORCHESTRATION_ADDR`, `GATEWAY_HTTP_ADDR`,
 `DAG_CONFIG_DIR`, `TENANTS_FILE`) — see each service's
 `main.go`/`application.yml` for defaults.
@@ -120,6 +131,14 @@ Expected response:
 {"claim_id":"clm-0001","correlation_id":"<generated>","status":"scored","normalized_address":"123 MAIN ST, SPRINGFIELD, IL, 62704, US","fraud_score":0.42,"model_version":"stub-v0"}
 ```
 
+Orchestration's logs will show `claimant_id_hash`, `address_normalize`, and
+`policy_lookup` all running (see [docs/dag-request-flow.md](docs/dag-request-flow.md))
+— if any of the three new/existing enrichment services isn't up yet, the DAG
+config's `on_failure` policy decides what happens: `claimant_id_hash` is
+`fail_fast` (whole request fails), `address_normalize` is `skip`, and
+`policy_lookup` is `degrade` (both of the latter two let the request
+continue with `status: degraded`).
+
 `GET http://localhost:8080/healthz` is also available on the gateway.
 
 ClaimsGateway currently always resolves the same hardcoded tenant id
@@ -136,7 +155,7 @@ verified when this layer was built (see [DECISIONS.md](DECISIONS.md) #9);
 
 ## 6. Stopping everything
 
-Ctrl+C each of the 5 terminals from step 4. Nothing here restarts itself or
+Ctrl+C each of the 7 terminals from step 4. Nothing here restarts itself or
 holds external state (no DB writes, no Kafka), so there's no cleanup step —
 just don't leave stray `go run`/`mvn spring-boot:run` processes running
 before switching branches or rebuilding.
@@ -152,13 +171,15 @@ before switching branches or rebuilding.
   Code window. Check the real local version with `go version` run *outside*
   any directory containing a go.work/go.mod file, to bypass the auto-switch.
 
-- **A Java gRPC service (e.g. address-normalization-svc) starts, logs
-  "Started Application," then the process exits immediately:** a
-  manually-started gRPC server in a non-web Spring Boot app needs a
-  non-daemon thread to keep the JVM alive — see
+- **A Java gRPC service (e.g. address-normalization-svc,
+  claimant-id-hashing-svc, policy-lookup-svc) starts, logs "Started
+  Application," then the process exits immediately:** a manually-started
+  gRPC server in a non-web Spring Boot app needs a non-daemon thread to keep
+  the JVM alive — see
   [GrpcServerLifecycle.java](services/address-normalization-svc/src/main/java/io/redcell/addressnorm/grpc/GrpcServerLifecycle.java)
-  for how this is handled here; apply the same pattern to any new Java
-  enrichment service wired the same way.
+  (each of the three Java services has its own copy of this same class) for
+  how this is handled; apply the same pattern to any new Java enrichment
+  service wired the same way.
 
 - **`go build ./...` / `go vet ./...` from the repo root fails with
   `directory prefix . does not contain modules listed in go.work`:** expected
