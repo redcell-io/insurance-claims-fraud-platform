@@ -18,8 +18,8 @@ expected-result), see [docs/manual-test-cases.md](docs/manual-test-cases.md).
   auto-toolchained. `go build`/`go run` mask an older local SDK via
   `GOTOOLCHAIN=auto`, but `gopls` doesn't (see Troubleshooting below).
 - Java 25 (Temurin) + Maven 3.9+
-- Docker (for Kafka/Postgres via docker-compose, once wired in — not needed
-  yet)
+- Docker (for the Kafka broker via `docker-compose.yml` — see step 4a.
+  Postgres isn't wired in yet.)
 
 ## 1. Regenerate protobuf stubs
 
@@ -73,10 +73,48 @@ cd ../policy-lookup-svc && mvn test
 
 ## 4. Run the full stack
 
-Seven processes, each in its own terminal, **in this order** —
-tenant-config-svc first, since both ClaimsGateway and Orchestration depend
-on it (each service dials its downstream addresses lazily, so a couple
-seconds' head start is enough, it doesn't have to be exact):
+### 4a. Kafka broker (Redpanda, via docker-compose)
+
+Start this **before** Orchestration, or its publish calls just fail-soft
+(`on_failure: skip` on the `publish` node — see DECISIONS.md #15):
+
+```sh
+docker compose up -d
+```
+
+Broker listens on **`localhost:19092`** — deliberately not the
+conventional `9092`, which address-normalization-svc's own gRPC server
+already owns in this repo (`9091`-`9096` below are all gRPC; `19092` is
+the one Kafka port in the mix). `docker compose down` to stop it; no
+volumes, so topic data doesn't persist across a `down`.
+
+### 4b. The seven services
+
+Two ways to do this — same end state, pick whichever fits:
+
+**Option A: scripted (`scripts/start-all.sh`)**
+
+```sh
+./scripts/start-all.sh          # prompts before killing anything
+./scripts/start-all.sh -y       # or --yes, skips the prompt
+```
+
+Starts all seven in the order below, each backgrounded with its own log
+under `logs/<service-name>.log` (tail with `tail -f logs/*.log`). If any of
+the seven ports is already bound (e.g. leftovers from an earlier session),
+it lists exactly what's using them (port, service, PID, process name) and
+asks for confirmation before killing those processes and continuing.
+Doesn't touch the Kafka broker (step 4a) or the test console — start those
+separately.
+
+**Option B: manual, one terminal per service**
+
+Gives you a live log/Ctrl+C per service in its own terminal, which the
+script's backgrounded/logged-to-file model doesn't. Same order, same
+reasoning either way — tenant-config-svc first since both ClaimsGateway and
+Orchestration depend on it (each service dials its downstream addresses
+lazily, so a couple seconds' head start is enough, it doesn't have to be
+exact):
 
 ```sh
 # 1. Tenant Config Service (Go) — gRPC :9094
@@ -94,7 +132,7 @@ cd services/address-normalization-svc && mvn spring-boot:run
 # 5. Policy Lookup (Java 25 / Spring Boot) — gRPC :9096
 cd services/policy-lookup-svc && mvn spring-boot:run
 
-# 6. Orchestration Service (Go) — gRPC :9091, calls #1-#5
+# 6. Orchestration Service (Go) — gRPC :9091, calls #1-#5 + the Kafka broker
 cd services/orchestration-service && go run ./cmd/orchestration
 
 # 7. ClaimsGateway (Go) — REST :8080, calls #1 and #6
@@ -105,10 +143,10 @@ Ports and downstream addresses are configurable via env vars
 (`TENANT_CONFIG_ADDR`/`TENANT_CONFIG_GRPC_ADDR`, `MODEL_GRPC_ADDR`,
 `ADDRESS_NORMALIZATION_ADDR`/`app.grpc.port`,
 `CLAIMANT_ID_HASHING_ADDR`/`app.grpc.port`,
-`POLICY_LOOKUP_ADDR`/`app.grpc.port`,
-`ORCHESTRATION_GRPC_ADDR`/`ORCHESTRATION_ADDR`, `GATEWAY_HTTP_ADDR`,
-`DAG_CONFIG_DIR`, `TENANTS_FILE`) — see each service's
-`main.go`/`application.yml` for defaults.
+`POLICY_LOOKUP_ADDR`/`app.grpc.port`, `KAFKA_BROKER_ADDR` (default
+`localhost:19092`), `ORCHESTRATION_GRPC_ADDR`/`ORCHESTRATION_ADDR`,
+`GATEWAY_HTTP_ADDR`, `DAG_CONFIG_DIR`, `TENANTS_FILE`) — see each
+service's `main.go`/`application.yml` for defaults.
 
 ## 5. Smoke test
 
@@ -137,7 +175,20 @@ Orchestration's logs will show `claimant_id_hash`, `address_normalize`, and
 config's `on_failure` policy decides what happens: `claimant_id_hash` is
 `fail_fast` (whole request fails), `address_normalize` is `skip`, and
 `policy_lookup` is `degrade` (both of the latter two let the request
-continue with `status: degraded`).
+continue with `status: degraded`). The `publish` node (real Kafka publish
+to `claims.realtime` as of DECISIONS.md #15) is `on_failure: skip` too —
+if the broker from step 4a isn't up, the log will show `dag node=publish
+failed, continuing (on_failure=skip)` and the response comes back
+`status: "degraded"` rather than failing outright.
+
+To confirm a scored claim actually reached the broker, either consume
+`claims.realtime` directly (`docker exec claimfraud-broker rpk topic
+consume claims.realtime --brokers localhost:9092 --offset start`, run
+*inside* the container — the broker's advertised listener is
+`localhost:19092`, which only resolves correctly from the host, not from
+inside its own container) or via the test console's Kafka panel
+(`localhost:19092`, `claims.realtime`, Avro decode off — see
+[docs/manual-test-cases.md](docs/manual-test-cases.md) TC-10).
 
 `GET http://localhost:8080/healthz` is also available on the gateway.
 
@@ -155,10 +206,23 @@ verified when this layer was built (see [DECISIONS.md](DECISIONS.md) #9);
 
 ## 6. Stopping everything
 
-Ctrl+C each of the 7 terminals from step 4. Nothing here restarts itself or
-holds external state (no DB writes, no Kafka), so there's no cleanup step —
-just don't leave stray `go run`/`mvn spring-boot:run` processes running
-before switching branches or rebuilding.
+**If you used Option B** (manual terminals): Ctrl+C each of the 7 terminals.
+
+**If you used Option A** (`scripts/start-all.sh`): the seven processes are
+backgrounded, not attached to a terminal — either re-run
+`./scripts/start-all.sh`, which detects all seven still listening and
+offers to kill them before relaunching (say no if you just want them
+stopped), or kill them directly:
+
+```sh
+powershell.exe -NoProfile -Command "Get-NetTCPConnection -LocalPort 9091,9092,9093,9094,9095,9096,8080 -State Listen | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force }"
+```
+
+Either way, finish with `docker compose down` for the broker from step 4a.
+Nothing here restarts itself or holds external state beyond the broker's
+own topic data (no DB writes), so there's no other cleanup step — just
+don't leave stray `go run`/`mvn spring-boot:run` processes (or the broker
+container) running before switching branches or rebuilding.
 
 ## Troubleshooting
 
@@ -184,3 +248,19 @@ before switching branches or rebuilding.
 - **`go build ./...` / `go vet ./...` from the repo root fails with
   `directory prefix . does not contain modules listed in go.work`:** expected
   — see step 2, run per module instead.
+
+- **`rpk topic describe`/`consume` run via `docker exec claimfraud-broker
+  ...` fails to dial, or hangs, with something like `dial tcp
+  [::1]:19092: connect: connection refused`:** the broker's advertised
+  listener is `localhost:19092`, which only resolves correctly from the
+  *host* (where the Docker port mapping lives) — from *inside* the
+  container's own network namespace, `localhost:19092` doesn't exist
+  (only `localhost:9092` does). `rpk topic list` works fine in-container
+  (metadata-only), but anything needing a leader connection (`describe
+  -p`, `consume`) follows the advertised address and breaks. Either point
+  `rpk` at `localhost:9092` (the container-internal port) when running it
+  *inside* the container via `docker exec`, or verify from the host
+  instead — a real client (Orchestration, the test console, or a
+  throwaway `kafka-go` consumer) connecting to `localhost:19092` from the
+  host works correctly, since that's the address it's actually advertised
+  for.

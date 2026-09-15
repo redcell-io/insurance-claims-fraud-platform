@@ -17,7 +17,18 @@ console-driven path.
 ## Prerequisites
 
 1. All 7 claim-fraud-platform processes running — [RUNBOOK.md](../RUNBOOK.md)
-   step 4.
+   step 4b — **plus the Kafka broker from step 4a** (`docker compose up
+   -d`) if you're running TC-10. Kafka connection details, for the
+   console's Kafka panel (Brokers / Topics fields):
+   | Field | Value |
+   |---|---|
+   | Brokers | `localhost:19092` |
+   | Topics | `claims.realtime` |
+   | Decode values as Avro | unchecked — plain JSON, no schema registry (see [DECISIONS.md](../DECISIONS.md) #15) |
+
+   Connect *before* submitting a claim — the panel's consumer starts from
+   the topic's latest offset, so a message produced before you click
+   Connect won't show up. Full walkthrough: TC-10 below.
 2. The console, backend on a **non-default port** (its default `:8080`
    collides with ClaimsGateway):
    ```sh
@@ -34,17 +45,24 @@ console-driven path.
 
 ## How to read each test case
 
-Every test case states the same five fields, always in this order, so
-none of them (port included) end up buried in prose:
+Every test case states the same six fields, always in this order, so
+none of them (protocol and port included) end up buried in prose or only
+implied by which console panel a screenshot would use:
 
+- **Protocol** — `REST`, `gRPC`, or `Kafka`. Stated as its own field, not
+  left to be inferred from the Endpoint line — TC-01 used to be ambiguous
+  about this (REST, but routed through the console's gRPC-adjacent-looking
+  proxy machinery) until this field was added.
 - **Endpoint** — the exact service/method (gRPC) or HTTP method+path
   (REST) being exercised.
 - **Port** — the exact `host:port` to put in the console's Target field
   (gRPC) or the target URL's authority (REST). Never says "same as
   TC-NN" — always the literal value, even when it repeats a prior test
   case's.
-- **Proto** — which `.proto` file to upload/parse in the console's gRPC
-  panel (gRPC only; omitted for REST test cases).
+- **Proto file** — which `.proto` file to upload/parse in the console's
+  gRPC panel (gRPC only; omitted for REST/Kafka test cases). Named "Proto
+  file," not "Proto," specifically so it doesn't read like a second,
+  competing **Protocol** field two lines above it.
 - **Payload** — exact JSON body to send.
 - **Expected response** — what a healthy run returns.
 - **Last verified** — most recent run's actual result and date, so this
@@ -59,12 +77,34 @@ ID hash + address normalization + policy lookup, in parallel) → Model
 Service, all through the console's REST proxy rather than curling
 ClaimsGateway directly.
 
-**Endpoint**: `POST /api/v1/proxy` (console's own proxy endpoint) →
-forwards to `POST /v1/claims` (ClaimsGateway)
+**Protocol**: REST (plain HTTP — not gRPC. The console's HTTP Request
+panel sends this by calling its own `POST /api/v1/proxy`, which then
+forwards it as a normal HTTP request; that's an implementation detail of
+the console, not a second protocol hop worth confusing with gRPC.)
 
-**Port**: console backend `localhost:8090` → target `localhost:8080`
+**Endpoint**: `POST /v1/claims` (ClaimsGateway) — sent via the console's
+HTTP proxy, `POST /api/v1/proxy`
 
-**Payload**:
+**Port**: target `localhost:8080` (ClaimsGateway) — console backend
+`localhost:8090` is just the relay, not what you're testing; it's never
+typed into the panel, the UI already knows its own backend address
+
+**Console UI steps** (Request panel — what to actually type in each
+field; this is the normal way to run this test case):
+1. **Method**: `POST`
+2. **URL**: `http://localhost:8080/v1/claims` — the real target, always
+   ClaimsGateway's actual address, never the console's own `:8090`
+3. **Headers**: one row, key `Content-Type`, value `application/json`
+4. **Body**:
+   ```json
+   {"claim_id":"clm-console-001","product":"auto","event_type":"claim.fnol","policy_number":"POL-123456","claimant_name":"Jane Doe","raw_address":"123 Main St, Springfield, IL 62704"}
+   ```
+5. Click **Send**.
+
+**Payload** (equivalent raw JSON body, only relevant if driving
+`/api/v1/proxy` directly via curl instead of the UI — see Prerequisites
+#3; the UI steps above build this for you, you don't construct it by
+hand):
 ```json
 {
   "method": "POST",
@@ -74,28 +114,31 @@ forwards to `POST /v1/claims` (ClaimsGateway)
 }
 ```
 Note: `headers` is `map[string][]string` — a plain string value
-(`{"Content-Type": "application/json"}`) 400s with a JSON unmarshal error.
+(`{"Content-Type": "application/json"}`) 400s with a JSON unmarshal error
+(only matters for the raw-curl path; the UI's header rows handle this
+correctly on their own).
 
 **Expected response**: `status: 200`, decoded `body.status: "scored"`,
 `body.fraud_score: 0.42`.
 
-**Last verified**: 2026-09-11 — `200`, `status:"scored"`,
+**Last verified**: 2026-09-13 — `200 OK`, `1045ms`, `status:"scored"`,
 `fraud_score:0.42`, `normalized_address:"123 MAIN ST, SPRINGFIELD, IL,
-62704, US"`, via the actual browser UI (not just curl) for the first
-time — see the 2026-09-11 run note below for why that distinction
-mattered. ✅ (Previously verified 2026-09-10: same result shape,
-`durationMs:524`.)
+62704, US"`, via the actual browser UI. ✅ (Previously verified
+2026-09-11: same result shape, via UI for the first time that session —
+see that run note below. 2026-09-10: `durationMs:524`, same shape.)
 
 ---
 
 ## TC-02 — tenant-config-svc: `GetTenant`
 
+**Protocol**: gRPC
+
 **Endpoint**: gRPC `tenantconfig.v1.TenantConfigService/GetTenant`
 
 **Port**: `localhost:9094`
 
-**Proto**: `proto/tenantconfig/v1/tenant_config.proto` (single uploaded
-file)
+**Proto file**: `proto/tenantconfig/v1/tenant_config.proto` (single
+uploaded file)
 
 **Payload**:
 ```json
@@ -106,41 +149,134 @@ file)
 Insurance Co", status:"active"}`.
 
 **Last verified**: 2026-09-11 — matched exactly. ✅ Also ad-hoc
-negative-tested with a typo'd `tenant_id` (`"acme_insuranc"`) — got a
-clean `rpc error: code = NotFound desc = tenant "acme_insuranc" not
-found` rather than a silent/wrong success. Worth promoting to a formal
-TC-02b if this file gets another pass.
+negative-tested with a typo'd `tenant_id` — see TC-02b below, formalized
+from this note.
+
+---
+
+## TC-02b — tenant-config-svc: `GetTenant`, unknown tenant
+
+Confirms an unrecognized `tenant_id` is a clean gRPC error, not a silent
+wrong/empty success — mirrors TC-07's role for policy-lookup-svc, but for
+a real NotFound instead of a normal found:false response (see
+`internal/server/tenantconfig.go`'s `status.Errorf(codes.NotFound, ...)`).
+
+**Protocol**: gRPC
+
+**Endpoint**: gRPC `tenantconfig.v1.TenantConfigService/GetTenant` (same
+as TC-02)
+
+**Port**: `localhost:9094`
+
+**Proto file**: `proto/tenantconfig/v1/tenant_config.proto` (same as
+TC-02)
+
+**Payload**:
+```json
+{"tenant_id": "acme_insuranc"}
+```
+(typo'd — one character short of the real `acme_insurance`)
+
+**Expected response**: a clean gRPC error, not `200`/success with empty
+fields — `rpc error: code = NotFound desc = tenant "acme_insuranc" not
+found`.
+
+**Worth knowing**: this request produces **no server-side log line at
+all**, success or error — same cause as TC-03b's note (`tenant-config-svc`
+has zero `log.Printf` calls in either RPC handler). The gRPC error is
+visible in the console's Response panel regardless; `logs/tenant-config-svc.log`
+stays empty either way.
+
+**Last verified**: 2026-09-14 — re-run live via the console's gRPC panel
+with a different unknown `tenant_id` (`"fake_insurance_insurance-tenant"`),
+got the expected `NotFound` error, and confirmed live via a tailed
+`tenant-config-svc.log` panel that nothing was written to the log ("No
+lines yet"). ✅ (Originally ad-hoc tested 2026-09-11 alongside TC-02;
+formalized as its own test case 2026-09-14.)
 
 ---
 
 ## TC-03 — tenant-config-svc: `GetDagVersion`
 
+**Protocol**: gRPC
+
 **Endpoint**: gRPC `tenantconfig.v1.TenantConfigService/GetDagVersion`
 
 **Port**: `localhost:9094`
 
-**Proto**: `proto/tenantconfig/v1/tenant_config.proto` (same upload as
-TC-02)
+**Proto file**: `proto/tenantconfig/v1/tenant_config.proto` (same upload
+as TC-02)
 
 **Payload**:
 ```json
 {"tenant_id": "acme_insurance", "product": "auto"}
 ```
 
-**Expected response**: `{"version": 2}` — matches
+**Expected response**: `{"version": 3}` — matches
 `config/tenants.yaml`'s `dag_versions.auto`.
 
-**Last verified**: 2026-09-11 — `{"version":2}`. ✅
+**Last verified**: 2026-09-14 — re-run live via the console's gRPC panel,
+`{"version":3}`, matching the corrected expected value exactly. ✅
+(Previously verified 2026-09-11 at `{"version":2}`, before
+`dag_versions.auto` was bumped 2→3 alongside the Kafka publish work — see
+DECISIONS.md #15.)
+
+---
+
+## TC-03b — tenant-config-svc: `GetDagVersion`, missing `product`
+
+Confirms an incomplete request (required-in-practice field omitted, not
+just wrong) is a clean gRPC error, not a silent wrong/empty success or a
+crash — same spirit as TC-02b, different flavor of bad input (missing
+field vs. wrong value).
+
+**Protocol**: gRPC
+
+**Endpoint**: gRPC `tenantconfig.v1.TenantConfigService/GetDagVersion`
+(same as TC-03)
+
+**Port**: `localhost:9094`
+
+**Proto file**: `proto/tenantconfig/v1/tenant_config.proto` (same as
+TC-03)
+
+**Payload**:
+```json
+{"tenant_id": "acme_insurance"}
+```
+(`product` omitted entirely — proto3 defaults it to `""` rather than
+rejecting the request at the framing level)
+
+**Expected response**: a clean gRPC error —
+`rpc error: code = NotFound desc = no dag version configured for tenant
+"acme_insurance" product ""` (empty `product` just fails the same
+map-lookup miss as any other unconfigured value — see
+`internal/server/tenantconfig.go`'s `GetDagVersion`).
+
+**Worth knowing**: this request produces **no server-side log line at
+all**, success or error — `tenant-config-svc` has zero `log.Printf` calls
+in either RPC handler (unlike ClaimsGateway, which at least logs its
+error branches). The gRPC error above is visible in the console's
+Response panel regardless; it just won't show up in
+`logs/tenant-config-svc.log`. See the 2026-09-14 note below for the
+broader logging gap this surfaces.
+
+**Last verified**: 2026-09-14 — re-run live via the console's gRPC panel,
+got the exact predicted error verbatim: `rpc error: code = NotFound desc
+= no dag version configured for tenant "acme_insurance" product ""`. ✅
+(Previously only derived from source, not run live — see prior note.)
 
 ---
 
 ## TC-04 — address-normalization-svc: `Normalize`
 
+**Protocol**: gRPC
+
 **Endpoint**: gRPC `addressnorm.v1.AddressNormalizationService/Normalize`
 
 **Port**: `localhost:9092`
 
-**Proto**: `proto/addressnorm/v1/address_normalization.proto`
+**Proto file**: `proto/addressnorm/v1/address_normalization.proto`
 
 **Payload**:
 ```json
@@ -158,12 +294,14 @@ TC-02)
 
 ## TC-05 — claimant-id-hashing-svc: `HashClaimantId`
 
+**Protocol**: gRPC
+
 **Endpoint**: gRPC
 `claimantidhash.v1.ClaimantIdHashingService/HashClaimantId`
 
 **Port**: `localhost:9095`
 
-**Proto**: `proto/claimantidhash/v1/claimant_id_hashing.proto`
+**Proto file**: `proto/claimantidhash/v1/claimant_id_hashing.proto`
 
 **Payload**:
 ```json
@@ -183,11 +321,13 @@ deterministic. ✅
 
 ## TC-06 — policy-lookup-svc: `LookupPolicy`, known policy
 
+**Protocol**: gRPC
+
 **Endpoint**: gRPC `policylookup.v1.PolicyLookupService/LookupPolicy`
 
 **Port**: `localhost:9096`
 
-**Proto**: `proto/policylookup/v1/policy_lookup.proto`
+**Proto file**: `proto/policylookup/v1/policy_lookup.proto`
 
 **Payload**:
 ```json
@@ -207,12 +347,14 @@ deterministic. ✅
 Confirms an unrecognized policy number is a normal *response*, not an
 RPC error — see [DECISIONS.md](../DECISIONS.md) #13.
 
+**Protocol**: gRPC
+
 **Endpoint**: gRPC `policylookup.v1.PolicyLookupService/LookupPolicy`
 (same as TC-06)
 
 **Port**: `localhost:9096`
 
-**Proto**: `proto/policylookup/v1/policy_lookup.proto` (same as TC-06)
+**Proto file**: `proto/policylookup/v1/policy_lookup.proto` (same as TC-06)
 
 **Payload**:
 ```json
@@ -234,11 +376,13 @@ decoded message differently run to run.)
 
 ## TC-08 — model-service: `Score`
 
+**Protocol**: gRPC
+
 **Endpoint**: gRPC `model.v1.ModelService/Score`
 
 **Port**: `localhost:9093`
 
-**Proto**: `proto/model/v1/model.proto`
+**Proto file**: `proto/model/v1/model.proto`
 
 **Payload**:
 ```json
@@ -267,11 +411,13 @@ metadata, injected by ClaimsGateway's interceptor (see
 [DESIGN.md](../DESIGN.md) §8). The console's `InvokeRequest` has no
 metadata field, so a direct call always resolves tenant to `""`.
 
+**Protocol**: gRPC
+
 **Endpoint**: gRPC `orchestration.v1.OrchestrationService/ProcessClaim`
 
 **Port**: `localhost:9091`
 
-**Proto**: `orchestration/v1/orchestration.proto` +
+**Proto file**: `orchestration/v1/orchestration.proto` +
 `claims/v1/claims.proto` (multi-file upload via the raw
 `/api/v1/grpc/parse` API's `files` map — not available in the frontend
 panel today)
@@ -342,6 +488,65 @@ request** in that repo's `docs/ROADMAP.md` ("Known open gaps") — see
 
 ---
 
+## TC-10 — Kafka: scored claim published to `claims.realtime`
+
+Confirms the `publish` DAG node's real Kafka publish (DECISIONS.md #15,
+replacing the old log-only stub) actually lands a message on the broker,
+using the console's Kafka streaming panel rather than curl/grpcurl — the
+first test case in this file that isn't HTTP or gRPC.
+
+**Protocol**: Kafka (not REST, not gRPC — the console's Kafka streaming
+panel, a third panel type distinct from the other two)
+
+**Endpoint**: Kafka topic `claims.realtime` (console's Kafka panel, not
+`/api/v1/proxy` or `/api/v1/grpc/*`)
+
+**Port**: `localhost:19092` (the broker from RUNBOOK.md step 4a — not
+`9092`, which address-normalization-svc's gRPC server already owns in
+this repo)
+
+**Proto file**: none — messages are plain JSON (DECISIONS.md #15), so leave
+"Decode values as Avro" **unchecked** in the console's Kafka panel.
+
+**Payload**: none to send — this test case *observes* a message produced
+by TC-01 (or any other happy-path claim submission), it doesn't submit
+one itself. Steps:
+1. In the console's Kafka panel: Brokers = `localhost:19092`, Topics =
+   `claims.realtime`, click **Connect**.
+2. Run TC-01 (or any `POST /v1/claims`) against a live stack.
+3. Watch the message arrive in the panel.
+
+**Expected response**: a JSON message appears, keyed by `tenant_id`
+(`acme_insurance`), with `claim_id`/`correlation_id` matching the claim
+just submitted, `status:"scored"`, `fraud_score:0.42`,
+`model_version:"stub-v0"`.
+
+**Last verified**: 2026-09-13 — **first time actually clicked through in
+the console's own browser UI** (previously only verified via a throwaway
+`kafka-go` consumer, see below). Connected the Kafka panel
+(`localhost:19092`, `claims.realtime`, Avro off), ran TC-01, message
+arrived in the panel within about a second:
+```
+claims.realtime · p0@1 · 8:28:23 AM
+key: acme_insurance
+{"claim_id":"clm-console-001","correlation_id":"3c39f8321fd24acd8d2b9f30542bb768","tenant_id":"acme_insurance","status":"scored","fraud_score":0.42,"model_version":"stub-v0"}
+```
+Confirms the panel renders plain (non-Avro) JSON cleanly, and that
+`correlation_id`/`claim_id` in the Kafka message match the REST response
+from the same TC-01 run exactly. ✅
+
+Previously verified 2026-09-11 via a throwaway `kafka-go` consumer
+(host-side, since `docker exec`-ing `rpk` into the broker container hits
+the advertised-listener gotcha documented in RUNBOOK.md's
+Troubleshooting — `rpk` inside the container can't resolve its own
+`localhost:19092`) rather than the console UI:
+```
+partition=0 offset=0 key=acme_insurance value={"claim_id":"clm-kafka-verify-1","correlation_id":"f69262a450328a7ea56d9c90d56f172b","tenant_id":"acme_insurance","status":"scored","fraud_score":0.42,"model_version":"stub-v0"}
+partition=0 offset=1 key=acme_insurance value={"claim_id":"clm-kafka-verify-2","correlation_id":"abd3ece941f4e56d5edb0bb27dcc6746","tenant_id":"acme_insurance","status":"scored","fraud_score":0.42,"model_version":"stub-v0"}
+```
+
+---
+
 ## 2026-09-10 full run summary
 
 All of TC-01 through TC-08 passed on the first run, back-to-back, with all
@@ -391,3 +596,55 @@ order (**Endpoint** / **Port** / **Proto** / **Payload** / **Expected
 response** / **Last verified**), with **Port** always stated as a
 literal `host:port` — never "same as TC-NN" — after that phrasing on
 TC-07 cost a round of confusion about which port to actually use.
+
+---
+
+## 2026-09-13 — Protocol field added
+
+TC-01's **Endpoint** line (`POST /api/v1/proxy` → forwards to `POST
+/v1/claims`) read ambiguously — not obviously REST vs. gRPC at a glance,
+despite the section header saying "REST." Fixed by promoting protocol to
+its own first-class field: every test case now leads with **Protocol**
+(`REST` / `gRPC` / `Kafka`), ahead of **Endpoint**. Six fields now, not
+five (see "How to read each test case," updated to match).
+
+Doing that put a **Protocol** field and the pre-existing **Proto** field
+(which `.proto` file to upload) right next to each other — similar enough
+names to recreate the exact confusion this was fixing. Renamed the latter
+to **Proto file** throughout to keep them visually and semantically
+distinct.
+
+---
+
+## 2026-09-14 — TC-02b, TC-03b added; correlation-ID gap found
+
+Formalized two negative test cases that had been sitting as inline notes
+rather than real entries: **TC-02b** (`GetTenant` with a typo'd
+`tenant_id` — clean `NotFound`, from TC-02's 2026-09-11 ad-hoc test) and
+**TC-03b** (`GetDagVersion` with `product` omitted entirely — also a
+clean `NotFound`, `product` defaulting to `""` rather than the request
+being rejected at the framing level). Also fixed TC-03's expected
+response, which had gone stale: `{"version": 2}` → `{"version": 3}`,
+matching `config/tenants.yaml`'s `dag_versions.auto` after the Kafka
+publish work bumped it — the test case just hadn't been updated to match.
+
+While working through TC-03b, found that **`tenant-config-svc` logs
+nothing at all, on any path, success or error** (confirmed by reading
+`internal/server/tenantconfig.go` directly — zero `log.Printf` calls in
+either RPC handler). Traced this back further: it's not just missing log
+statements — `tenant_config.proto`'s request messages have **no
+`correlation_id` field**, unlike every sibling service's proto, and
+neither caller (ClaimsGateway's `GetTenant`, Orchestration's
+`GetDagVersion`) threads a correlation ID through despite having one in
+scope. Confirmed the rest of the call graph (Orchestration → enrichment
+services → Kafka) already propagates `correlation_id` correctly via the
+established dual pattern (`x-correlation-id` gRPC metadata + an explicit
+payload field) — `tenant-config-svc` is the one actual broken link, not
+just an unused one.
+
+**Decision**: fixing this (the proto field + threading) and the broader
+fix (a `grpc.UnaryServerInterceptor`-style uniform logger across every
+service, rather than more hand-written `log.Printf` calls) are both
+explicitly deferred to DESIGN.md §11's observability/OpenTelemetry layer,
+not done piecemeal now — recorded in [[current-progress]] (Claude's
+memory) so it isn't rediscovered from scratch when that layer starts.

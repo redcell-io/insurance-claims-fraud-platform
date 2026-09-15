@@ -14,13 +14,16 @@ console tool or raw curl), and
 
 Walking skeleton done. Layer 2a (Tenant Config Service + config-driven DAG
 execution engine, replacing the hardcoded tenant and hardcoded DAG) done.
-Now done with **all three Java enrichment services** from DESIGN.md §4:
+Done with **all three Java enrichment services** from DESIGN.md §4:
 Claimant ID Hashing and Policy Lookup joined Address Normalization in the
 DAG's "enrichment" group — both thin slices (static-salt hash, fixture-backed
-lookup). See [DECISIONS.md](DECISIONS.md) for what's still deferred
-(resilience/observability, batch flow, and layer 2's own remaining scope:
-Postgres, transactional outbox, Kafka cache invalidation, JSON Schema
-validation, API-key auth).
+lookup). The `publish` stage now does a **real Kafka publish** (Redpanda via
+`docker-compose.yml`, JSON to `claims.realtime`, `on_failure: skip`),
+replacing the log-only stub — see [DECISIONS.md](DECISIONS.md) #15 for why
+JSON rather than Protobuf + schema registry. See [DECISIONS.md](DECISIONS.md)
+for what's still deferred (resilience/observability, batch flow, real Model
+Service, and layer 2's own remaining scope: Postgres, transactional outbox,
+Kafka cache invalidation, JSON Schema validation, API-key auth).
 
 ## Repo layout
 
@@ -50,7 +53,8 @@ claim-fraud-platform/
 
 - Go 1.25+ (the local SDK must actually be ≥1.25, not just auto-toolchained)
 - Java 25 (Temurin) + Maven 3.9+
-- Docker (for Kafka/Postgres via docker-compose, once wired in)
+- Docker (for the Kafka broker via `docker-compose.yml`; Postgres not wired
+  in yet)
 
 ## Running, testing, troubleshooting
 

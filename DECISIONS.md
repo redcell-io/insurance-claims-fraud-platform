@@ -214,3 +214,39 @@ would defeat that. This is safe specifically because `claimant_id_hash`'s
 Orchestration reaches the feature-map-building stage, the hash is
 guaranteed to exist, so there's no case where raw PII is the only thing
 available to send.
+
+## 15. Real Kafka publish: JSON to a Redpanda broker, not Protobuf +
+    schema registry yet
+
+**Decision:** the `kafka-publisher` DAG node is now a real publish
+(`internal/kafka`, `github.com/segmentio/kafka-go`) to `claims.realtime`
+(DESIGN.md §10), replacing the log-only stub. Messages are plain
+JSON-encoded `ScoredClaimEvent` structs, keyed by `tenant_id` for
+partitioning. The broker itself is Redpanda via `docker-compose.yml`
+(Kafka-API compatible, same choice already proven out in the separate
+all-in-one-end-to-end-test-console project), exposed on host port
+**`19092`**, not Kafka's conventional `9092` — that port already belongs
+to address-normalization-svc's own gRPC server in this repo, and
+separately to the test-console project's own Redpanda broker; `19092`
+avoids colliding with either. Also added `on_failure: skip` to the
+`publish` node (`claim.fnol.yaml` v3) — the score is already computed by
+the time this stage runs, so a broker outage should degrade the response
+(client still gets a score), not fail the whole request.
+
+**Why:** proves the actual contract that matters — a scored claim
+reliably reaches a real broker on the real target topic, correctly
+partitioned — without first building the full DESIGN.md §10 messaging
+stack (Protobuf wire format, schema registry, topic provisioning as its
+own concern). Same "thin slice first" reasoning as #1/#3/#8/#12/#13.
+JSON specifically (not raw Protobuf bytes) also keeps the message
+human-readable in the test console's Kafka panel without needing Avro/
+schema-registry decode support it doesn't have — directly useful for
+`docs/manual-test-cases.md`'s console-driven verification.
+
+**Deferred:** Protobuf wire format + Confluent schema registry
+integration for `claims.realtime` (DESIGN.md's target messaging
+convention), `claims.historical` (Batch Transform's topic — no batch flow
+yet at all), `dag-config.updated` cache
+invalidation (§6.1, tracked under #8's deferred scope), topic
+provisioning/retention as an explicit ops concern (currently relies on
+`AllowAutoTopicCreation`).

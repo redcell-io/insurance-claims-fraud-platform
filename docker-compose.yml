@@ -1,16 +1,40 @@
 # Local dev environment for the claim-fraud-platform walking skeleton.
 #
-# Intentionally minimal for now — the skeleton runs the three services
-# directly with `go run` / `mvn spring-boot:run` (see README.md) rather
-# than via Docker, so nothing below is wired up yet. Filled in
-# incrementally as each piece is built:
-#   - claims-gateway, orchestration-service, address-normalization-svc,
-#     model-service as containers (once Dockerfiles exist under infra/docker/)
-#   - kafka + schema registry (once the stub publish becomes real)
-#   - postgres (once Tenant Config Service exists)
+# Kafka broker (Redpanda — Kafka-API compatible, same choice as the
+# separate all-in-one-end-to-end-test-console project) is the only
+# piece wired up so far. The seven claim-fraud-platform services
+# themselves still run directly via `go run` / `mvn spring-boot:run`
+# (see RUNBOOK.md), not as containers — this file exists purely to
+# give Orchestration's real kafka-publisher (DECISIONS.md #15) and the
+# test console something real to talk to.
+#
+# Host port 19092, not Kafka's conventional 9092: address-normalization-svc
+# already owns :9092 for its own gRPC server (see RUNBOOK.md's port
+# table), and the test-console project's own docker-compose.yml also
+# claims :9092 for its own Redpanda broker — 19092 avoids colliding
+# with either. Same lesson as the test console's Vite dev-proxy
+# hardcoding :8080 and silently breaking against this repo's non-default
+# ports (see that repo's skills/httpproxy.md): don't default to the
+# port everything else defaults to.
+#
+# Usage: docker compose up -d
+#   Kafka broker: localhost:19092
+services:
+  broker:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: claimfraud-broker
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://localhost:19092
+    ports:
+      - "19092:9092"
+    restart: unless-stopped
 
-services: {}
-
-# networks:
-#   claims-net:
-#     driver: bridge
+#   - postgres (once Tenant Config Service's real store lands)

@@ -19,6 +19,7 @@ sequenceDiagram
     participant AN as address-normalization-svc
     participant PL as policy-lookup-svc
     participant Model as model-service
+    participant Kafka as claims.realtime
 
     Client->>GW: POST /v1/claims
     GW->>TC: GetTenant(hardcodedTenantID)
@@ -41,7 +42,8 @@ sequenceDiagram
     Note over Orch: features use claimant_id_hash, never raw claimant_name
     Orch->>Model: Score(features) [depends_on: enrichment]
     Model-->>Orch: fraud_score, model_version
-    Note over Orch: publish stage — stub, logs only [depends_on: model_score]
+    Orch->>Kafka: publish ScoredClaimEvent (JSON), key=tenant_id [depends_on: model_score, on_failure: skip]
+    Note over Orch: broker outage degrades the response, doesn't fail it
     Orch-->>GW: ProcessClaimResponse
     GW-->>Client: 200 JSON response
 ```
@@ -69,7 +71,7 @@ DECISIONS.md #10 for why that's a deliberate, not-yet-needed simplification.)
 | 11b | Stage 1 (enrichment group): normalize address | [internal/dag/executor.go](../services/orchestration-service/internal/dag/executor.go) → [client/addressnorm.go](../services/orchestration-service/internal/client/addressnorm.go) → (Java) [grpc/AddressNormalizationGrpcService.java](../services/address-normalization-svc/src/main/java/io/redcell/addressnorm/grpc/AddressNormalizationGrpcService.java) → [AddressNormalizer.java](../services/address-normalization-svc/src/main/java/io/redcell/addressnorm/AddressNormalizer.java) |
 | 11c | Stage 1 (enrichment group): look up policy | [internal/dag/executor.go](../services/orchestration-service/internal/dag/executor.go) → [client/policylookup.go](../services/orchestration-service/internal/client/policylookup.go) → (Java) [grpc/PolicyLookupGrpcService.java](../services/policy-lookup-svc/src/main/java/io/redcell/policylookup/grpc/PolicyLookupGrpcService.java) → [PolicyLookup.java](../services/policy-lookup-svc/src/main/java/io/redcell/policylookup/PolicyLookup.java) |
 | 12 | Stage 2 (`depends_on: [enrichment]`): builds the feature map (uses `claimant_id_hash`, never raw `claimant_name` — DECISIONS.md #14) and calls Model Service | [internal/dag/executor.go](../services/orchestration-service/internal/dag/executor.go) → [client/model.go](../services/orchestration-service/internal/client/model.go) → (Go stub) [model-service/internal/server/model.go](../services/model-service/internal/server/model.go) |
-| 13 | Stage 3 (`depends_on: [model_score]`): stub publish, logs only | [internal/dag/executor.go](../services/orchestration-service/internal/dag/executor.go) |
+| 13 | Stage 3 (`depends_on: [model_score]`): real publish to `claims.realtime` (JSON, keyed by `tenant_id`), `on_failure: skip` | [internal/dag/executor.go](../services/orchestration-service/internal/dag/executor.go) → [internal/kafka/publisher.go](../services/orchestration-service/internal/kafka/publisher.go) → Redpanda (`docker-compose.yml`) |
 | 14 | Response built and returned up the chain | [orchestration-service/internal/server/orchestration.go](../services/orchestration-service/internal/server/orchestration.go) → [claims-gateway/internal/handler/claims.go](../services/claims-gateway/internal/handler/claims.go) |
 
 ## Notes
@@ -88,7 +90,8 @@ DECISIONS.md #10 for why that's a deliberate, not-yet-needed simplification.)
   (none `depends_on` another) — declared as concurrent in the DAG's own
   model, but the current executor runs them sequentially in file order; see
   `executor.go`'s doc comment.
-- This trace is current as of the remaining-enrichment-services pass;
-  `DECISIONS.md` explains why the DAG loading here is un-cached,
-  un-validated, and staged rather than topologically sorted, and why
-  claimant hashing/policy lookup are thin slices (#12, #13).
+- This trace is current as of the real-Kafka-publish pass; `DECISIONS.md`
+  explains why the DAG loading here is un-cached, un-validated, and
+  staged rather than topologically sorted, why claimant hashing/policy
+  lookup are thin slices (#12, #13), and why the Kafka publish is JSON to
+  a Redpanda broker rather than Protobuf + schema registry (#15).

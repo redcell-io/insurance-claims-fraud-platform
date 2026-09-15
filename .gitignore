@@ -33,3 +33,8 @@ Thumbs.db
 # Env / secrets
 .env
 .env.local
+
+# Runtime logs (scripts/start-all.sh writes here; ad hoc *.log files from
+# manually redirecting a service's output land in its own service/ dir)
+logs/
+*.log

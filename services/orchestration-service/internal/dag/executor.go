@@ -11,6 +11,7 @@ import (
 	claimantidhashv1 "claimfraud/proto/gen/go/claimantidhash/v1"
 	modelv1 "claimfraud/proto/gen/go/model/v1"
 	policylookupv1 "claimfraud/proto/gen/go/policylookup/v1"
+	"claimfraud/services/orchestration-service/internal/kafka"
 )
 
 // AddressNormalizer, ClaimantIDHasher, PolicyLookuper, and Scorer are the
@@ -65,6 +66,7 @@ type Executor struct {
 	ClaimantIDHash ClaimantIDHasher
 	PolicyLookup   PolicyLookuper
 	Model          Scorer
+	Publisher      kafka.Publisher
 }
 
 const groupEnrichment = "enrichment"
@@ -166,18 +168,34 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 		return nil, fmt.Errorf("dag: no model_score result produced")
 	}
 
-	// Stage 3: nodes depending on model_score (publish) — stubbed, logs
-	// only. Real version: kafka-publisher to claims.realtime (DESIGN.md §10).
+	// Stage 3: nodes depending on model_score (publish) — real publish to
+	// claims.realtime (DESIGN.md §10). on_failure is expected to be
+	// "skip" for this node (see claim.fnol.yaml's comment): the score is
+	// already computed by this point, so a broker outage should degrade
+	// the response rather than fail the whole request.
 	for _, node := range cfg.Nodes {
 		if !dependsOn(node, nodeModelScore) || !node.EnabledForTenant(tenantID) {
 			continue
 		}
 		switch node.Service {
 		case "kafka-publisher":
-			log.Printf(
-				"correlation_id=%s tenant_id=%s claim_id=%s STUB-PUBLISH status=%s fraud_score=%.4f model_version=%s",
-				correlationID, tenantID, claim.GetClaimId(), status, scoreResp.GetScore(), scoreResp.GetModelVersion(),
-			)
+			event := kafka.ScoredClaimEvent{
+				ClaimID:       claim.GetClaimId(),
+				CorrelationID: correlationID,
+				TenantID:      tenantID,
+				Status:        status,
+				FraudScore:    scoreResp.GetScore(),
+				ModelVersion:  scoreResp.GetModelVersion(),
+			}
+			if err := e.Publisher.Publish(ctx, event); err != nil {
+				if !nodeFailureHandled(node, correlationID, err) {
+					return nil, err
+				}
+				status = "degraded"
+				continue
+			}
+			log.Printf("correlation_id=%s tenant_id=%s claim_id=%s published to %s",
+				correlationID, tenantID, claim.GetClaimId(), kafka.TopicClaimsRealtime)
 		default:
 			log.Printf("correlation_id=%s dag node=%s: unrecognized service %q, skipping", correlationID, node.ID, node.Service)
 		}

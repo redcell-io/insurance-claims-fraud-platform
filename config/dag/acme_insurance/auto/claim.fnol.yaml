@@ -6,10 +6,15 @@
 # (remaining enrichment services, DESIGN.md §4 items 3/5) — both join the
 # existing group unchanged, per DECISIONS.md #10 (staged executor, no
 # depends_on changes needed). v1 had only address_normalize.
+#
+# v3: kafka-publisher is a real publish now, not a log stub (DECISIONS.md
+# #15) — added on_failure: skip so a broker outage degrades the response
+# instead of fail_fast-ing a request whose score has already been
+# computed by this point.
 tenant_id: acme_insurance
 product: auto
 event_type: claim.fnol
-version: 2
+version: 3
 timeout_ms: 250
 
 nodes:
@@ -39,3 +44,5 @@ nodes:
   - id: publish
     service: kafka-publisher
     depends_on: [model_score]
+    timeout_ms: 100
+    on_failure: skip

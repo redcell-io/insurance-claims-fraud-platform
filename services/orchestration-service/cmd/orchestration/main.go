@@ -14,6 +14,7 @@ import (
 	orchestrationv1 "claimfraud/proto/gen/go/orchestration/v1"
 	"claimfraud/services/orchestration-service/internal/client"
 	"claimfraud/services/orchestration-service/internal/dag"
+	"claimfraud/services/orchestration-service/internal/kafka"
 	"claimfraud/services/orchestration-service/internal/server"
 
 	"google.golang.org/grpc"
@@ -26,6 +27,7 @@ func main() {
 	tenantConfigAddr := getenv("TENANT_CONFIG_ADDR", "localhost:9094")
 	claimantIDHashAddr := getenv("CLAIMANT_ID_HASHING_ADDR", "localhost:9095")
 	policyLookupAddr := getenv("POLICY_LOOKUP_ADDR", "localhost:9096")
+	kafkaBrokerAddr := getenv("KAFKA_BROKER_ADDR", "localhost:19092")
 	dagConfigDir := getenv("DAG_CONFIG_DIR", "../../config/dag")
 
 	tenantConfig, err := client.DialTenantConfig(tenantConfigAddr)
@@ -58,6 +60,9 @@ func main() {
 	}
 	defer model.Close()
 
+	publisher := kafka.NewPublisher(kafkaBrokerAddr)
+	defer publisher.Close()
+
 	srv := &server.Server{
 		Executor: &dag.Executor{
 			Loader: &dag.Loader{
@@ -68,6 +73,7 @@ func main() {
 			ClaimantIDHash: claimantIDHash,
 			PolicyLookup:   policyLookup,
 			Model:          model,
+			Publisher:      publisher,
 		},
 	}
 
@@ -79,8 +85,8 @@ func main() {
 	grpcServer := grpc.NewServer()
 	orchestrationv1.RegisterOrchestrationServiceServer(grpcServer, srv)
 
-	log.Printf("orchestration-service listening on %s (address-norm=%s, claimant-id-hash=%s, policy-lookup=%s, model=%s, tenant-config=%s, dag-config-dir=%s)",
-		grpcAddr, addressNormAddr, claimantIDHashAddr, policyLookupAddr, modelAddr, tenantConfigAddr, dagConfigDir)
+	log.Printf("orchestration-service listening on %s (address-norm=%s, claimant-id-hash=%s, policy-lookup=%s, model=%s, tenant-config=%s, kafka-broker=%s, dag-config-dir=%s)",
+		grpcAddr, addressNormAddr, claimantIDHashAddr, policyLookupAddr, modelAddr, tenantConfigAddr, kafkaBrokerAddr, dagConfigDir)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("orchestration-service server failed: %v", err)
 	}

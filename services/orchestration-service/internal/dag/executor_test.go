@@ -10,6 +10,7 @@ import (
 	claimsv1 "claimfraud/proto/gen/go/claims/v1"
 	modelv1 "claimfraud/proto/gen/go/model/v1"
 	policylookupv1 "claimfraud/proto/gen/go/policylookup/v1"
+	"claimfraud/services/orchestration-service/internal/kafka"
 )
 
 type fakeConfigLoader struct {
@@ -63,22 +64,34 @@ func (f *fakeScorer) Score(ctx context.Context, correlationID string, features m
 	return f.resp, f.err
 }
 
+type fakePublisher struct {
+	err     error
+	called  bool
+	lastMsg kafka.ScoredClaimEvent
+}
+
+func (f *fakePublisher) Publish(ctx context.Context, event kafka.ScoredClaimEvent) error {
+	f.called = true
+	f.lastMsg = event
+	return f.err
+}
+
 // testConfig reproduces config/dag/acme_insurance/auto/claim.fnol.yaml's
-// v2 shape: claimant_id_hash (fail_fast) + address_normalize (skip) +
+// v3 shape: claimant_id_hash (fail_fast) + address_normalize (skip) +
 // policy_lookup (degrade) [enrichment group] -> model_score (default
-// fail_fast) -> publish.
+// fail_fast) -> publish (skip).
 func testConfig() *Config {
 	return &Config{
 		TenantID:  "acme_insurance",
 		Product:   "auto",
 		EventType: "claim.fnol",
-		Version:   2,
+		Version:   3,
 		Nodes: []Node{
 			{ID: "claimant_id_hash", Service: "claimant-id-hashing-svc", Group: groupEnrichment, OnFailure: OnFailureFailFast},
 			{ID: "address_normalize", Service: "address-normalization-svc", Group: groupEnrichment, OnFailure: OnFailureSkip},
 			{ID: "policy_lookup", Service: "policy-lookup-svc", Group: groupEnrichment, OnFailure: OnFailureDegrade},
 			{ID: "model_score", Service: "model-service", DependsOn: []string{groupEnrichment}},
-			{ID: "publish", Service: "kafka-publisher", DependsOn: []string{nodeModelScore}},
+			{ID: "publish", Service: "kafka-publisher", DependsOn: []string{nodeModelScore}, OnFailure: OnFailureSkip},
 		},
 	}
 }
@@ -107,6 +120,10 @@ func successfulPolicyLookup() *fakePolicyLookup {
 	return &fakePolicyLookup{resp: &policylookupv1.LookupPolicyResponse{Found: true, Status: "active", CoverageType: "full"}}
 }
 
+func successfulPublisher() *fakePublisher {
+	return &fakePublisher{}
+}
+
 func TestExecutorRunHappyPath(t *testing.T) {
 	e := &Executor{
 		Loader:         &fakeConfigLoader{cfg: testConfig()},
@@ -114,6 +131,7 @@ func TestExecutorRunHappyPath(t *testing.T) {
 		ClaimantIDHash: successfulClaimantIDHash(),
 		PolicyLookup:   successfulPolicyLookup(),
 		Model:          &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.42, ModelVersion: "stub-v0"}},
+		Publisher:      successfulPublisher(),
 	}
 	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol", RawAddress: "raw", ClaimantName: "Jane Doe", PolicyNumber: "POL-123456"}
 
@@ -142,6 +160,7 @@ func TestExecutorRunAddressNormalizeFailureDegradesWithSkipPolicy(t *testing.T) 
 		ClaimantIDHash: successfulClaimantIDHash(),
 		PolicyLookup:   successfulPolicyLookup(),
 		Model:          &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.5, ModelVersion: "v1"}},
+		Publisher:      successfulPublisher(),
 	}
 	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol", RawAddress: "raw address"}
 
@@ -164,6 +183,7 @@ func TestExecutorRunModelScoreFailureFailsFastByDefault(t *testing.T) {
 		ClaimantIDHash: successfulClaimantIDHash(),
 		PolicyLookup:   successfulPolicyLookup(),
 		Model:          &fakeScorer{err: errors.New("model-service unavailable")},
+		Publisher:      successfulPublisher(),
 	}
 	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol"}
 
@@ -180,6 +200,7 @@ func TestExecutorRunClaimantIdHashFailureFailsFast(t *testing.T) {
 		ClaimantIDHash: &fakeClaimantIDHasher{err: errors.New("claimant-id-hashing-svc unavailable")},
 		PolicyLookup:   successfulPolicyLookup(),
 		Model:          &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.1, ModelVersion: "v1"}},
+		Publisher:      successfulPublisher(),
 	}
 	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol"}
 
@@ -198,6 +219,7 @@ func TestExecutorRunPolicyNotFoundStillScores(t *testing.T) {
 		// call itself succeeds.
 		PolicyLookup: &fakePolicyLookup{resp: &policylookupv1.LookupPolicyResponse{Found: false, Status: "unknown"}},
 		Model:        &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.9, ModelVersion: "v1"}},
+		Publisher:    successfulPublisher(),
 	}
 	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol", PolicyNumber: "POL-DOES-NOT-EXIST"}
 
@@ -207,6 +229,62 @@ func TestExecutorRunPolicyNotFoundStillScores(t *testing.T) {
 	}
 	if result.Status != "scored" {
 		t.Errorf("Status = %q, want %q (an unknown policy number is not a degrade condition)", result.Status, "scored")
+	}
+}
+
+func TestExecutorRunPublishesScoredEvent(t *testing.T) {
+	pub := successfulPublisher()
+	e := &Executor{
+		Loader:         &fakeConfigLoader{cfg: testConfig()},
+		AddressNorm:    &fakeAddressNorm{resp: &addressnormv1.NormalizeResponse{NormalizedAddress: "123 MAIN ST"}},
+		ClaimantIDHash: successfulClaimantIDHash(),
+		PolicyLookup:   successfulPolicyLookup(),
+		Model:          &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.42, ModelVersion: "stub-v0"}},
+		Publisher:      pub,
+	}
+	claim := &claimsv1.ClaimEvent{ClaimId: "clm-7", Product: "auto", EventType: "claim.fnol"}
+
+	if _, err := e.Run(context.Background(), "acme_insurance", "corr-7", claim); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !pub.called {
+		t.Fatal("Publisher.Publish was not called")
+	}
+	want := kafka.ScoredClaimEvent{
+		ClaimID:       "clm-7",
+		CorrelationID: "corr-7",
+		TenantID:      "acme_insurance",
+		Status:        "scored",
+		FraudScore:    0.42,
+		ModelVersion:  "stub-v0",
+	}
+	if pub.lastMsg != want {
+		t.Errorf("published event = %+v, want %+v", pub.lastMsg, want)
+	}
+}
+
+func TestExecutorRunPublishFailureDegradesWithSkipPolicy(t *testing.T) {
+	e := &Executor{
+		Loader:         &fakeConfigLoader{cfg: testConfig()},
+		AddressNorm:    &fakeAddressNorm{resp: &addressnormv1.NormalizeResponse{NormalizedAddress: "x"}},
+		ClaimantIDHash: successfulClaimantIDHash(),
+		PolicyLookup:   successfulPolicyLookup(),
+		Model:          &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.42, ModelVersion: "stub-v0"}},
+		Publisher:      &fakePublisher{err: errors.New("broker unavailable")},
+	}
+	claim := &claimsv1.ClaimEvent{ClaimId: "clm-8", Product: "auto", EventType: "claim.fnol"}
+
+	result, err := e.Run(context.Background(), "acme_insurance", "corr-8", claim)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil (publish's on_failure=skip should not fail the run)", err)
+	}
+	if result.Status != "degraded" {
+		t.Errorf("Status = %q, want %q (a failed publish degrades the response, per claim.fnol.yaml's on_failure: skip on the publish node)", result.Status, "degraded")
+	}
+	// The client still gets its score even though the publish failed —
+	// that's the whole point of on_failure: skip here.
+	if result.FraudScore != 0.42 {
+		t.Errorf("FraudScore = %v, want 0.42 (a publish failure shouldn't discard an already-computed score)", result.FraudScore)
 	}
 }
 
@@ -221,6 +299,7 @@ func TestExecutorRunSkipsNodeNotEnabledForTenant(t *testing.T) {
 		ClaimantIDHash: successfulClaimantIDHash(),
 		PolicyLookup:   successfulPolicyLookup(),
 		Model:          &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.1, ModelVersion: "v1"}},
+		Publisher:      successfulPublisher(),
 	}
 	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol", RawAddress: "untouched raw address"}
 
