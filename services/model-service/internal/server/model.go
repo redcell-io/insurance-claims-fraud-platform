@@ -1,19 +1,18 @@
-// Package server implements a STUB ModelService: returns a fixed score
-// regardless of input. Real version (DESIGN.md §9): Java + ONNX Runtime
-// or a Go client to TorchServe/Triton, feature-map-driven inference,
-// per-tenant/product model_version resolution. See build-order-plan —
-// this stub exists only to prove the gRPC contract end-to-end.
+// Package server implements ModelService: real, deterministic
+// feature-driven scoring, not ML yet. Real version (DESIGN.md §9): Java +
+// ONNX Runtime or a Go client to TorchServe/Triton, a trained model
+// artifact, per-tenant/product model_version resolution. See DECISIONS.md
+// #16 for why this thin slice is a formula rather than ONNX, and what's
+// deferred.
 package server
 
 import (
 	"context"
+	"log"
 
 	modelv1 "claimfraud/proto/gen/go/model/v1"
-)
 
-const (
-	stubScore        = 0.42
-	stubModelVersion = "stub-v0"
+	"claimfraud/services/model-service/internal/scoring"
 )
 
 type Server struct {
@@ -21,8 +20,12 @@ type Server struct {
 }
 
 func (s *Server) Score(ctx context.Context, req *modelv1.ScoreRequest) (*modelv1.ScoreResponse, error) {
+	score, explanations := scoring.Score(req.GetFeatures())
+
+	log.Printf("correlation_id=%s score=%.2f reasons=%v", req.GetCorrelationId(), score, explanations)
+
 	return &modelv1.ScoreResponse{
-		Score:        stubScore,
-		ModelVersion: stubModelVersion,
+		Score:        score,
+		ModelVersion: scoring.ModelVersion,
 	}, nil
 }

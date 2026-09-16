@@ -20,10 +20,14 @@ DAG's "enrichment" group — both thin slices (static-salt hash, fixture-backed
 lookup). The `publish` stage now does a **real Kafka publish** (Redpanda via
 `docker-compose.yml`, JSON to `claims.realtime`, `on_failure: skip`),
 replacing the log-only stub — see [DECISIONS.md](DECISIONS.md) #15 for why
-JSON rather than Protobuf + schema registry. See [DECISIONS.md](DECISIONS.md)
-for what's still deferred (resilience/observability, batch flow, real Model
-Service, and layer 2's own remaining scope: Postgres, transactional outbox,
-Kafka cache invalidation, JSON Schema validation, API-key auth).
+JSON rather than Protobuf + schema registry. Model Service now returns a
+**real, deterministic, feature-driven score** (not a hardcoded value) via
+a hand-weighted formula, not ONNX/ML yet — see
+[DECISIONS.md](DECISIONS.md) #16. See [DECISIONS.md](DECISIONS.md)
+for what's still deferred (resilience/observability, batch flow, real
+ONNX/ML inference, and layer 2's own remaining scope: Postgres,
+transactional outbox, Kafka cache invalidation, JSON Schema validation,
+API-key auth).
 
 ## Repo layout
 
@@ -44,7 +48,7 @@ claim-fraud-platform/
 │   ├── claimant-id-hashing-svc/     # Java 25 / Spring Boot / Maven — enrichment
 │   ├── address-normalization-svc/   # Java 25 / Spring Boot / Maven — enrichment
 │   ├── policy-lookup-svc/           # Java 25 / Spring Boot / Maven — enrichment
-│   └── model-service/               # stub fraud-scoring service
+│   └── model-service/               # rules-based fraud-scoring (not ML yet)
 ├── frontend/                        # React
 └── infra/docker/                    # per-service Dockerfiles
 ```

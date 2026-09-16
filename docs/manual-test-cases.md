@@ -119,13 +119,20 @@ Note: `headers` is `map[string][]string` — a plain string value
 correctly on their own).
 
 **Expected response**: `status: 200`, decoded `body.status: "scored"`,
-`body.fraud_score: 0.42`.
+`body.fraud_score: 0.05`, `body.model_version: "rules-v1"` (was `0.42`/
+`"stub-v0"` before DECISIONS.md #16 — Model Service now returns a real,
+deterministic score instead of a hardcoded one; `0.05` is what this
+specific claim's inputs compute to, not an arbitrary new constant — see
+`internal/scoring/scoring.go`).
 
 **Last verified**: 2026-09-13 — `200 OK`, `1045ms`, `status:"scored"`,
 `fraud_score:0.42`, `normalized_address:"123 MAIN ST, SPRINGFIELD, IL,
-62704, US"`, via the actual browser UI. ✅ (Previously verified
-2026-09-11: same result shape, via UI for the first time that session —
-see that run note below. 2026-09-10: `durationMs:524`, same shape.)
+62704, US"`, via the actual browser UI. ✅ **Predates DECISIONS.md #16**
+(the `0.42` was correct for the stub in place at the time) — not yet
+re-run against the real scoring formula, due next pass. (Previously
+verified 2026-09-11: same result shape, via UI for the first time that
+session — see that run note below. 2026-09-10: `durationMs:524`, same
+shape.)
 
 ---
 
@@ -285,10 +292,12 @@ got the exact predicted error verbatim: `rpc error: code = NotFound desc
 
 **Expected response**: normalized address breakdown with `valid:true`.
 
-**Last verified**: 2026-09-11 —
+**Last verified**: 2026-09-15 — re-run live via the console's gRPC panel,
+`2ms`, exact match:
 `{"normalizedAddress":"123 MAIN ST, SPRINGFIELD, IL, 62704, US",
 "line1":"123 MAIN ST","city":"SPRINGFIELD","state":"IL",
-"postalCode":"62704","country":"US","valid":true}`. ✅
+"postalCode":"62704","country":"US","valid":true}`. ✅ (Previously
+verified 2026-09-11, same result shape.)
 
 ---
 
@@ -337,8 +346,9 @@ deterministic. ✅
 **Expected response**: `{"found":true, "status":"active",
 "coverageType":"full"}`.
 
-**Last verified**: 2026-09-10 — matched exactly. ✅ (Not re-run
-2026-09-11 — due next pass.)
+**Last verified**: 2026-09-15 — re-run live via the console's gRPC panel,
+`7ms`, exact match: `{"found":true,"status":"active","coverageType":"full"}`.
+✅ (Previously verified 2026-09-10, same result.)
 
 ---
 
@@ -364,13 +374,17 @@ RPC error — see [DECISIONS.md](../DECISIONS.md) #13.
 **Expected response**: `found` absent/false, `status:"unknown"`, no RPC
 error.
 
-**Last verified**: 2026-09-11 — `{"status":"unknown"}`, no error. ✅
-(Note: shape differs slightly from the 2026-09-10 run —
-`{"response":{"status":"unknown"},"durationMs":1}` — no `response`
-wrapper or `durationMs` this time. Not a regression: `found`
-absent/false and `status:"unknown"` both hold either way, which is all
-this test case actually checks; looks like console UI just renders the
-decoded message differently run to run.)
+**Last verified**: 2026-09-15 — re-run live via the console's gRPC panel
+(saved as "policyLookupService - Unknown Policy"), `2ms`,
+`{"status":"unknown"}`, no error. ✅ Run with `policy_number: "POL"`
+rather than the documented `"POL-BOGUS-999"` — still a valid run of this
+test case, since the point is *any* unconfigured policy number returns
+`status:"unknown"` without erroring, not that specific string; both
+values are equally "not in the fixture map" (see
+`services/policy-lookup-svc/.../PolicyLookup.java`'s `KNOWN_POLICIES`).
+(Previously verified 2026-09-11 — same result. 2026-09-10 run had a
+`response`/`durationMs` wrapper the UI apparently doesn't always render;
+not a regression, `status:"unknown"` held both times.)
 
 ---
 
@@ -389,27 +403,44 @@ decoded message differently run to run.)
 {"correlation_id": "console-test-1", "features": {"tenant_id": "acme_insurance"}}
 ```
 
-**Expected response**: `{"score":0.42, "modelVersion":"stub-v0"}`
-(hardcoded stub — see [DESIGN.md](../DESIGN.md)/[DECISIONS.md](../DECISIONS.md)
-for the real ONNX/Triton model still pending).
+**Expected response**: `{"score":0.50, "modelVersion":"rules-v1"}` (was
+`{"score":0.42, "modelVersion":"stub-v0"}` before DECISIONS.md #16 —
+Model Service is now a real deterministic formula, not a hardcoded
+value; real ONNX/ML inference is still pending). This payload's
+`features` only sets `tenant_id` — none of `policy_status`/
+`policy_coverage_type`/`address_valid` are present, so every one of the
+formula's defaults applies (the riskiest case for each, per DESIGN.md
+§9's "trained-in defaults, not nulls"): `0.05` base + `0.30` (no
+`policy_status`) + `0.05` (no `policy_coverage_type`) + `0.10` (no
+`address_valid`) = `0.50`. Incidentally a good regression check for the
+all-defaults path — see `internal/scoring/scoring_test.go`'s equivalent
+case.
 
-**Last verified**: 2026-09-10 — matched exactly. ✅ (Not re-run
-2026-09-11 — due next pass.)
+**Last verified**: 2026-09-15 — re-run live via the console's gRPC panel,
+`0ms`, exact match: `{"score":0.42,"modelVersion":"stub-v0"}`. ✅
+**Predates DECISIONS.md #16** (correct for the stub at the time) — not
+yet re-run against the real formula, due next pass. (Previously verified
+2026-09-10, same result; not re-run 2026-09-11.)
 
 ---
 
-## TC-09 — OrchestrationService: `ProcessClaim` via direct gRPC (known limitation)
+## TC-09 — OrchestrationService: `ProcessClaim` via direct gRPC
 
-Not a pass/fail test of claim-fraud-platform — this documents a **console
-limitation** so it isn't re-discovered from scratch. `orchestration.proto`
-imports `claims/v1/claims.proto`, which the console's frontend can't parse
-(single-file upload only); the raw `/api/v1/grpc/parse` API supports
-multi-file via its `files` map, so the import itself is *not* the blocker
-it first looks like. The real blocker: `claims.v1.ClaimEvent` deliberately
-excludes `tenant_id` from the payload — it travels as `x-tenant-id` gRPC
-metadata, injected by ClaimsGateway's interceptor (see
-[DESIGN.md](../DESIGN.md) §8). The console's `InvokeRequest` has no
-metadata field, so a direct call always resolves tenant to `""`.
+**Now a real pass/fail test** — both console-side blockers that used to
+make this "known limitation only" are resolved as of 2026-09-15/16:
+multi-file proto upload (`orchestration.proto` imports
+`claims/v1/claims.proto`) and per-call gRPC metadata (`claims.v1.ClaimEvent`
+deliberately excludes `tenant_id` from the payload — it travels as
+`x-tenant-id` gRPC metadata, injected by ClaimsGateway's interceptor, see
+[DESIGN.md](../DESIGN.md) §8). Confirmed by reading that project's
+current source directly (`GrpcPanel.tsx`'s `fileRows`/`grpcFiles.ts` for
+multi-file; `InvokeRequest.Metadata map[string][]string` +
+`invoker.go`'s `metadata.NewOutgoingContext` for headers, both now real,
+not just spec'd) and **by actually invoking this exact RPC through the
+raw API and getting a genuine scored response back**, not an error — see
+Last verified below. This is the first version of this test case that
+exercises OrchestrationService's real logic directly via gRPC, not just
+indirectly through TC-01's REST path.
 
 **Protocol**: gRPC
 
@@ -418,17 +449,46 @@ metadata field, so a direct call always resolves tenant to `""`.
 **Port**: `localhost:9091`
 
 **Proto file**: `orchestration/v1/orchestration.proto` +
-`claims/v1/claims.proto` (multi-file upload via the raw
-`/api/v1/grpc/parse` API's `files` map — not available in the frontend
-panel today)
+`claims/v1/claims.proto` — upload both directly in the console's gRPC
+panel (multi-file support: add both file rows, set
+`orchestration/v1/orchestration.proto` as the entry file).
 
-**Workaround (until the console's frontend supports multi-file
-upload — tracked in its `docs/ROADMAP.md`)**: run these two curls from
-the repo root (Git Bash; `jq` required for the first one) instead of
-using the GRPC panel's Parse/Invoke buttons.
+**Metadata** (new panel section, "Metadata (sent as gRPC headers, not
+part of the request body)" — add two rows):
+```
+x-tenant-id: acme_insurance
+x-correlation-id: tc09-test-1
+```
 
-Parse (multi-file, via the backend's raw API — build the `files` map
-from the actual proto sources so it never drifts from what's on disk):
+**Payload** (the Request field):
+```json
+{"claim": {"claim_id": "clm-console-002", "product": "auto", "event_type": "claim.fnol", "policy_number": "POL-123456", "claimant_name": "Jane Doe", "raw_address": "123 Main St, Springfield, IL 62704"}}
+```
+
+**Console UI steps** (this is the first test case in this file to use
+either the multi-file or metadata UI, so spelled out precisely rather
+than assumed — GRPC tab):
+1. First file row: paste
+   [proto/orchestration/v1/orchestration.proto](../proto/orchestration/v1/orchestration.proto)'s
+   contents into the textarea, set its filename field to
+   `orchestration/v1/orchestration.proto`, and select its **Entry file**
+   radio button.
+2. Click **+ Add file**. In the new second row, paste
+   [proto/claims/v1/claims.proto](../proto/claims/v1/claims.proto)'s
+   contents, filename `claims/v1/claims.proto`. Leave its **Entry file**
+   radio unselected (row 1 stays the entry file).
+3. Click **Parse**.
+4. **Service** dropdown → `orchestration.v1.OrchestrationService`,
+   **Method** → `ProcessClaim`, **Target** → `localhost:9091`.
+5. Under **Metadata**, click **+ Add metadata** twice. Row 1: key
+   `x-tenant-id`, value `acme_insurance`. Row 2: key `x-correlation-id`,
+   value `tc09-test-1` (or any string — it just round-trips into the
+   response).
+6. Paste the **Payload** JSON above into the Request field.
+7. Click **Invoke**.
+
+**Raw-API equivalent** (if driving via curl instead of the UI — same
+idea as every other test case's raw-API note; run from the repo root):
 ```sh
 jq -n \
   --arg entry "orchestration/v1/orchestration.proto" \
@@ -437,54 +497,56 @@ jq -n \
   '{entryFile: $entry, files: {"orchestration/v1/orchestration.proto": $orch, "claims/v1/claims.proto": $claims}}' \
   > /tmp/parse_request.json
 
-curl -s -X POST http://localhost:8090/api/v1/grpc/parse \
+HASH=$(curl -s -X POST http://localhost:8090/api/v1/grpc/parse \
   -H "Content-Type: application/json" \
-  -d @/tmp/parse_request.json
-```
-Copy the `hash` from the response into the invoke call below.
+  -d @/tmp/parse_request.json | jq -r .hash)
 
-Invoke:
-```sh
 curl -s -X POST http://localhost:8090/api/v1/grpc/invoke \
   -H "Content-Type: application/json" \
-  -d '{
-    "hash": "<hash from the Parse response above>",
-    "service": "orchestration.v1.OrchestrationService",
-    "method": "ProcessClaim",
-    "target": "localhost:9091",
-    "request": {"claim": {"claim_id": "clm-console-002", "product": "auto", "event_type": "claim.fnol", "policy_number": "POL-123456", "claimant_name": "Jane Doe", "raw_address": "123 Main St, Springfield, IL 62704"}}
-  }'
+  -d "{
+    \"hash\": \"$HASH\",
+    \"service\": \"orchestration.v1.OrchestrationService\",
+    \"method\": \"ProcessClaim\",
+    \"target\": \"localhost:9091\",
+    \"metadata\": {\"x-tenant-id\": [\"acme_insurance\"], \"x-correlation-id\": [\"tc09-test-1\"]},
+    \"request\": {\"claim\": {\"claim_id\": \"clm-console-002\", \"product\": \"auto\", \"event_type\": \"claim.fnol\", \"policy_number\": \"POL-123456\", \"claimant_name\": \"Jane Doe\", \"raw_address\": \"123 Main St, Springfield, IL 62704\"}}
+  }"
 ```
 
-**Payload** (the `request` field of the Invoke call above; shown
-standalone too, matching every other test case's format in this
-file):
+**Expected response**: a real scored result, matching TC-01's shape —
+`status:"scored"`, `fraud_score:0.05`, `model_version:"rules-v1"` for
+this specific claim's inputs (same reasoning as TC-01's note).
+
+**Last verified**: 2026-09-16 — **through the actual browser UI**,
+following this test case's own Console UI steps above exactly (2 file
+rows, both metadata rows, `ProcessClaim`): `1008ms`,
 ```json
-{"claim": {"claim_id": "clm-console-002", "product": "auto", "event_type": "claim.fnol", "policy_number": "POL-123456", "claimant_name": "Jane Doe", "raw_address": "123 Main St, Springfield, IL 62704"}}
+{"claimId":"clm-console-002","correlationId":"tc09-test-1","status":"scored","normalizedAddress":"123 MAIN ST, SPRINGFIELD, IL, 62704, US","fraudScore":0.05,"modelVersion":"rules-v1"}
 ```
+Exact match. ✅ Kafka panel also showed the resulting message land on
+`claims.realtime` in the same session (key `acme_insurance`,
+`correlation_id` matching). This is the first time both
+OrchestrationService's real DAG logic *and* the console's own multi-file
++ metadata UI have been exercised together, through the real browser UI,
+in one confirmed pass — not the raw API, and not inferred from TC-01.
 
-**Expected response** (given the console's current limitation):
-`Parse` succeeds; `Invoke` returns a clean gRPC `NotFound` — *not* a
-hang, timeout, or silent empty response — because tenant resolves to
-`""`.
+(Earlier the same day: first attempt via the raw API returned the old
+`NotFound: tenant ""` error even with `metadata` set, traced to a stale
+console backend process — started 2026-09-13, before the metadata
+feature existed in source. Restarted it, raw API succeeded, then the UI
+run above confirmed it end-to-end. If you ever hit `NotFound: tenant ""`
+again despite setting metadata correctly, check whether the console
+backend process predates your last build in that project first.)
 
-**Last verified**: 2026-09-11 — Parse succeeded via the raw
-`/api/v1/grpc/parse` API with a `files` map (frontend single-file
-upload still fails identically to 2026-09-10, confirmed again this
-session — see below). Invoke →
-`{"error":"invoking ProcessClaim: rpc error: code = NotFound desc = load
-dag config: resolve dag version: rpc error: code = NotFound desc = no dag
-version configured for tenant \"\" product \"auto\""}`. Confirms the
-failure mode is clean, not broken — this is expected until the console
-gains metadata support (tracked in that repo's own `skills/grpc.md`).
-**Use TC-01 (REST) to actually exercise OrchestrationService's logic** —
-this test case exists only to confirm the gRPC path's known ceiling, not
-as a substitute for TC-01. (Previously verified 2026-09-10: identical
-result.)
-
-**Console-side multi-file-upload gap now tracked as a feature
-request** in that repo's `docs/ROADMAP.md` ("Known open gaps") — see
-`skills/grpc.md`'s 2026-09-11 entry for the fix shape.
+**History, kept for context** (this test case was "known limitation
+only" from 2026-09-10 through 2026-09-15 — see git history on this file
+for those entries if the full story matters): originally
+`orchestration.proto`'s import wasn't parseable via the frontend's
+single-file upload; multi-file support landed 2026-09-15, confirmed via
+that project's `skills/grpc.md` (maintainer re-ran this exact proto pair
+through headless Chromium). The remaining metadata gap was tracked as
+"Feature 11 — gRPC Invoke Metadata" in that project's `docs/ROADMAP.md`
+and implemented by 2026-09-16, closing this out completely.
 
 ---
 
@@ -518,8 +580,9 @@ one itself. Steps:
 
 **Expected response**: a JSON message appears, keyed by `tenant_id`
 (`acme_insurance`), with `claim_id`/`correlation_id` matching the claim
-just submitted, `status:"scored"`, `fraud_score:0.42`,
-`model_version:"stub-v0"`.
+just submitted, `status:"scored"`, `fraud_score:0.05`,
+`model_version:"rules-v1"` (was `0.42`/`"stub-v0"` before DECISIONS.md
+#16 — see TC-01's note for why `0.05` specifically).
 
 **Last verified**: 2026-09-13 — **first time actually clicked through in
 the console's own browser UI** (previously only verified via a throwaway
@@ -533,7 +596,11 @@ key: acme_insurance
 ```
 Confirms the panel renders plain (non-Avro) JSON cleanly, and that
 `correlation_id`/`claim_id` in the Kafka message match the REST response
-from the same TC-01 run exactly. ✅
+from the same TC-01 run exactly. ✅ **Both runs below predate
+DECISIONS.md #16** — `fraud_score:0.42`/`model_version:"stub-v0"` were
+correct for the stub in place at the time; not yet re-run against the
+real scoring formula, due next pass (kept verbatim as an accurate
+historical record, not updated in place).
 
 Previously verified 2026-09-11 via a throwaway `kafka-go` consumer
 (host-side, since `docker exec`-ing `rpk` into the broker container hits

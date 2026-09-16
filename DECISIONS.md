@@ -250,3 +250,49 @@ yet at all), `dag-config.updated` cache
 invalidation (§6.1, tracked under #8's deferred scope), topic
 provisioning/retention as an explicit ops concern (currently relies on
 `AllowAutoTopicCreation`).
+
+## 16. Model Service: a real deterministic formula, not ONNX yet
+
+**Decision:** `internal/scoring.Score` replaces the old hardcoded stub
+(`score: 0.42, model_version: "stub-v0"`, identical for every claim
+regardless of input) with a real, hand-weighted formula over the feature
+map Orchestration assembles: `policy_status` (`active` +0.00, `lapsed`
++0.15, `cancelled` +0.25, unknown/not-found +0.30), `policy_coverage_type`
+empty +0.05, `address_valid` not `true` +0.10, from a `0.05` base,
+clamped to `[0, 1]`. `model_version` is now `"rules-v1"`. Each triggered
+rule is logged server-side with `correlation_id` (`internal/server/model.go`)
+— the first real log output this service has ever produced, and DESIGN.md
+§9's "feature-level explanations" goal in spirit, without a proto/API
+change this pass.
+
+Needed one new signal that didn't exist yet: `address_valid` wasn't in
+Orchestration's feature map (only `normalized_address`, the string, was).
+Added by capturing `NormalizeResponse.valid` in
+`internal/dag/executor.go`'s Stage 1, defaulting to `false` (not omitted)
+when the node is skipped/degraded — DESIGN.md §9: "trained-in defaults,
+not nulls," a claim this service can't confidently verify the address for
+should read as unverified, not silently absent.
+
+**Why:** proves the score actually *responds* to real enrichment signals
+— submit a claim against an unknown policy number and it visibly scores
+higher, submit the standard smoke-test claim and it's a clean, reproducible
+`0.05` — without first building ONNX Runtime integration, a trained model
+artifact, or model-version hot-swapping. Same "thin slice first" reasoning
+as #1/#3/#8/#12/#13/#15. Stays in **Go**, no language switch to Java:
+this is a formula, not a model-serving runtime, so there's no reason to
+pull in ONNX Runtime or match the other enrichment services' language for
+it.
+
+**Rejected for this pass:** exposing `explanations` as a new
+`ScoreResponse` field (would need a proto change + regen for a thin slice
+that's explicitly not the real API contract yet — logging is enough to
+prove the reasoning is real); a Go ONNX Runtime binding
+(`github.com/yalue/onnxruntime_go`) instead of a formula (still would've
+needed a trained model artifact from somewhere — doesn't avoid the real
+cost, just moves it).
+
+**Deferred:** real ONNX Runtime (or TorchServe/Triton) inference, a
+trained model artifact (versioned, per DESIGN.md §9, in S3), hot-swappable
+`model_version` resolved per tenant/product (same pattern as DAG
+versions), feature-level explanations actually exposed via the API rather
+than just logged.

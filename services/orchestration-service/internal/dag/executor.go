@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 
 	claimsv1 "claimfraud/proto/gen/go/claims/v1"
 
@@ -83,6 +84,11 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 	claimantIDHash := ""
 	policyStatus := ""
 	policyCoverageType := ""
+	// Defaults to false (not "unknown") on skip/degrade/never-ran — a
+	// claim this service can't confidently verify the address for should
+	// read as unverified to Model Service, not silently absent (DESIGN.md
+	// §9: "trained-in defaults, not nulls"). See DECISIONS.md #16.
+	addressValid := false
 
 	// Stage 1: enrichment group — nodes with no depends_on.
 	for _, node := range cfg.Nodes {
@@ -110,6 +116,7 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 				continue
 			}
 			normalizedAddress = normResp.GetNormalizedAddress()
+			addressValid = normResp.GetValid()
 		case "policy-lookup-svc":
 			// found=false is a normal business result (unknown policy
 			// number), not a call failure — on_failure only applies to the
@@ -151,6 +158,7 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 				"normalized_address":   normalizedAddress,
 				"policy_status":        policyStatus,
 				"policy_coverage_type": policyCoverageType,
+				"address_valid":        strconv.FormatBool(addressValid),
 			}
 			resp, err := e.Model.Score(ctx, correlationID, features)
 			if err != nil {

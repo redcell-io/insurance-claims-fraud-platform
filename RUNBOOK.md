@@ -120,7 +120,7 @@ exact):
 # 1. Tenant Config Service (Go) — gRPC :9094
 cd services/tenant-config-svc && go run ./cmd/tenantconfig
 
-# 2. Model Service (Go stub) — gRPC :9093
+# 2. Model Service (Go, rules-based scoring — not ML) — gRPC :9093
 cd services/model-service && go run ./cmd/model
 
 # 3. Claimant ID Hashing (Java 25 / Spring Boot) — gRPC :9095
@@ -166,7 +166,7 @@ curl -s -X POST http://localhost:8080/v1/claims \
 Expected response:
 
 ```json
-{"claim_id":"clm-0001","correlation_id":"<generated>","status":"scored","normalized_address":"123 MAIN ST, SPRINGFIELD, IL, 62704, US","fraud_score":0.42,"model_version":"stub-v0"}
+{"claim_id":"clm-0001","correlation_id":"<generated>","status":"scored","normalized_address":"123 MAIN ST, SPRINGFIELD, IL, 62704, US","fraud_score":0.05,"model_version":"rules-v1"}
 ```
 
 Orchestration's logs will show `claimant_id_hash`, `address_normalize`, and

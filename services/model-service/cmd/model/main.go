@@ -1,5 +1,5 @@
-// Command model runs a STUB Model Service — fixed score, no real
-// inference. See internal/server for why.
+// Command model runs Model Service — real, deterministic feature-driven
+// scoring (not ML yet). See internal/server and DECISIONS.md #16.
 package main
 
 import (
@@ -24,7 +24,7 @@ func main() {
 	grpcServer := grpc.NewServer()
 	modelv1.RegisterModelServiceServer(grpcServer, &server.Server{})
 
-	log.Printf("model-service (STUB) listening on %s", grpcAddr)
+	log.Printf("model-service (rules-based, not ML) listening on %s", grpcAddr)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("model-service server failed: %v", err)
 	}
