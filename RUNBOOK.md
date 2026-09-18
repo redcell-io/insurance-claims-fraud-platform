@@ -264,3 +264,17 @@ container) running before switching branches or rebuilding.
   throwaway `kafka-go` consumer) connecting to `localhost:19092` from the
   host works correctly, since that's the address it's actually advertised
   for.
+
+- **Redpanda broker container is up (`docker compose ps` shows it
+  running) but Orchestration's publish calls fail-soft
+  (`on_failure=skip`) or Kafka clients can't connect at all:** check
+  whether it's actually stuck in a restart loop rather than genuinely
+  healthy — `docker inspect claimfraud-broker --format '{{.RestartCount}}'`
+  (seen a `RestartCount` in the thousands, e.g. `1122`, from a single bad
+  start). A high/climbing `RestartCount` means the container keeps
+  crashing and respawning under `docker compose`'s restart policy, which
+  can look "running" in `docker compose ps` at any given instant while
+  never actually staying up long enough to serve traffic. Fix:
+  `docker compose down && docker compose up -d` (a plain `docker restart`
+  isn't enough — start clean). No volumes are configured, so topic data
+  doesn't persist across the `down` either way (see step 4a).

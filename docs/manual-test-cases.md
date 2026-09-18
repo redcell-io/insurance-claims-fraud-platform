@@ -125,14 +125,19 @@ deterministic score instead of a hardcoded one; `0.05` is what this
 specific claim's inputs compute to, not an arbitrary new constant — see
 `internal/scoring/scoring.go`).
 
-**Last verified**: 2026-09-13 — `200 OK`, `1045ms`, `status:"scored"`,
-`fraud_score:0.42`, `normalized_address:"123 MAIN ST, SPRINGFIELD, IL,
-62704, US"`, via the actual browser UI. ✅ **Predates DECISIONS.md #16**
-(the `0.42` was correct for the stub in place at the time) — not yet
-re-run against the real scoring formula, due next pass. (Previously
-verified 2026-09-11: same result shape, via UI for the first time that
-session — see that run note below. 2026-09-10: `durationMs:524`, same
-shape.)
+**Last verified**: 2026-09-18 — re-run live against the real `rules-v1`
+scoring formula (raw `curl` against ClaimsGateway directly, not the
+console UI this pass): `200`, `1.73s`, `status:"scored"`,
+`fraud_score:0.05`, `model_version:"rules-v1"`,
+`normalized_address:"123 MAIN ST, SPRINGFIELD, IL, 62704, US"`. ✅ Exact
+match to this test case's documented expected response — first re-run
+since DECISIONS.md #16 shipped. (Prior runs below predate #16 and are
+kept verbatim as historical record: 2026-09-13 — `200 OK`, `1045ms`,
+`status:"scored"`, `fraud_score:0.42`, `normalized_address:"123 MAIN ST,
+SPRINGFIELD, IL, 62704, US"`, via the actual browser UI, correct for the
+stub in place at the time. Previously verified 2026-09-11: same result
+shape, via UI for the first time that session — see that run note below.
+2026-09-10: `durationMs:524`, same shape.)
 
 ---
 
@@ -321,10 +326,13 @@ verified 2026-09-11, same result shape.)
 stable across repeat calls with the same `claimant_name`
 (case/whitespace normalized — see [DECISIONS.md](../DECISIONS.md) #12).
 
-**Last verified**: 2026-09-11 —
-`{"claimantIdHash":"7b9d77204ff21b167f8936bf0deefef40eee95574b6c9432fa890e5b6135065f"}`
-— byte-for-byte identical to the 2026-09-10 run, confirming the hash is
-deterministic. ✅
+**Last verified**: 2026-09-18 — re-run live via a throwaway gRPC client
+(direct RPC, not the console UI this pass):
+`claimant_id_hash:"7b9d77204ff21b167f8936bf0deefef40eee95574b6c9432fa890e5b6135065f"`
+— byte-for-byte identical to both the 2026-09-11 and 2026-09-10 runs,
+confirming the hash is still deterministic across sessions. ✅ (This
+service is unaffected by DECISIONS.md #16 — hashing logic, not scoring —
+so this re-run is a staleness check, not a formula-change check.)
 
 ---
 
@@ -416,11 +424,15 @@ formula's defaults applies (the riskiest case for each, per DESIGN.md
 all-defaults path — see `internal/scoring/scoring_test.go`'s equivalent
 case.
 
-**Last verified**: 2026-09-15 — re-run live via the console's gRPC panel,
-`0ms`, exact match: `{"score":0.42,"modelVersion":"stub-v0"}`. ✅
-**Predates DECISIONS.md #16** (correct for the stub at the time) — not
-yet re-run against the real formula, due next pass. (Previously verified
-2026-09-10, same result; not re-run 2026-09-11.)
+**Last verified**: 2026-09-18 — re-run live against the real `rules-v1`
+formula via a throwaway gRPC client (direct RPC, not the console UI this
+pass): `score:0.5, model_version:"rules-v1"`. ✅ Exact match to the
+all-defaults calculation documented above — first re-run since
+DECISIONS.md #16 shipped. (2026-09-15 run below predates #16, kept
+verbatim as historical record: re-run live via the console's gRPC panel,
+`0ms`, exact match at the time: `{"score":0.42,"modelVersion":"stub-v0"}`,
+correct for the stub in place then. Previously verified 2026-09-10, same
+result; not re-run 2026-09-11.)
 
 ---
 
@@ -584,7 +596,21 @@ just submitted, `status:"scored"`, `fraud_score:0.05`,
 `model_version:"rules-v1"` (was `0.42`/`"stub-v0"` before DECISIONS.md
 #16 — see TC-01's note for why `0.05` specifically).
 
-**Last verified**: 2026-09-13 — **first time actually clicked through in
+**Last verified**: 2026-09-18 — re-run live against the real `rules-v1`
+formula via a throwaway `kafka-go` consumer (host-side, reading from
+offset 0), not the console UI this pass: submitted a fresh claim
+(`clm-tc10-rerun`) via `POST /v1/claims`, then confirmed it landed on the
+broker at offset 15:
+```
+offset=15 key=acme_insurance value={"claim_id":"clm-tc10-rerun","correlation_id":"75d9aa237af85862f64788a2b40e211a","tenant_id":"acme_insurance","status":"scored","fraud_score":0.05,"model_version":"rules-v1"}
+```
+`correlation_id` matches the same claim's `POST /v1/claims` response
+exactly. ✅ First re-run since DECISIONS.md #16 shipped — `fraud_score`
+is now `0.05`/`rules-v1` instead of the old stub values below.
+
+Prior runs kept verbatim as historical record, all predating #16:
+
+2026-09-13 — **first time actually clicked through in
 the console's own browser UI** (previously only verified via a throwaway
 `kafka-go` consumer, see below). Connected the Kafka panel
 (`localhost:19092`, `claims.realtime`, Avro off), ran TC-01, message
