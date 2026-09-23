@@ -4,10 +4,11 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
+	"claimfraud/pkg/telemetry"
 	claimsv1 "claimfraud/proto/gen/go/claims/v1"
 	orchestrationv1 "claimfraud/proto/gen/go/orchestration/v1"
 	tenantconfigv1 "claimfraud/proto/gen/go/tenantconfig/v1"
@@ -34,6 +35,7 @@ const (
 type ClaimsHandler struct {
 	TenantConfig  *client.TenantConfigClient
 	Orchestration *client.OrchestrationClient
+	Logger        *slog.Logger
 }
 
 // claimRequest mirrors the subset of claims.v1.ClaimEvent accepted over
@@ -79,26 +81,28 @@ func (h *ClaimsHandler) SubmitClaim(w http.ResponseWriter, r *http.Request) {
 	}
 
 	correlationID := correlation.New()
+	ctx := telemetry.WithCorrelationID(r.Context(), correlationID)
 
 	// Tenant resolution + status check (DESIGN.md §8 steps 2-3), before
 	// anything downstream runs. Real API-key resolution is still deferred
 	// (see hardcodedTenantID above) but the status gate itself is real.
-	tenantCtx, err := h.resolveTenant(r.Context(), correlationID)
+	tenantCtx, err := h.resolveTenant(ctx, correlationID)
 	if err != nil {
-		log.Printf("correlation_id=%s tenant resolution failed for %s: %v", correlationID, hardcodedTenantID, err)
+		h.log(ctx).Error("tenant resolution failed", "tenant_id", hardcodedTenantID, "error", err)
 		writeError(w, http.StatusForbidden, "tenant not found or unavailable")
 		return
 	}
 	if tenantCtx.GetStatus() != "active" {
-		log.Printf("correlation_id=%s tenant %s not active (status=%s)", correlationID, hardcodedTenantID, tenantCtx.GetStatus())
+		h.log(ctx).Warn("tenant not active", "tenant_id", hardcodedTenantID, "status", tenantCtx.GetStatus())
 		writeError(w, http.StatusForbidden, "tenant is not active")
 		return
 	}
+	ctx = telemetry.WithTenantID(ctx, hardcodedTenantID)
 
-	ctx, cancel := context.WithTimeout(r.Context(), orchestrationTimeout)
+	orchCtx, cancel := context.WithTimeout(ctx, orchestrationTimeout)
 	defer cancel()
 
-	resp, err := h.Orchestration.ProcessClaim(ctx, hardcodedTenantID, correlationID,
+	resp, err := h.Orchestration.ProcessClaim(orchCtx,
 		&orchestrationv1.ProcessClaimRequest{
 			Claim: &claimsv1.ClaimEvent{
 				ClaimId:       req.ClaimID,
@@ -111,7 +115,7 @@ func (h *ClaimsHandler) SubmitClaim(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	if err != nil {
-		log.Printf("correlation_id=%s orchestration call failed: %v", correlationID, err)
+		h.log(ctx).Error("orchestration call failed", "error", err)
 		writeError(w, http.StatusBadGateway, "orchestration call failed")
 		return
 	}
@@ -124,6 +128,12 @@ func (h *ClaimsHandler) SubmitClaim(w http.ResponseWriter, r *http.Request) {
 		FraudScore:        resp.FraudScore,
 		ModelVersion:      resp.ModelVersion,
 	})
+}
+
+// log returns h.Logger annotated with whatever correlation_id/tenant_id
+// ctx carries (see telemetry.FromContext).
+func (h *ClaimsHandler) log(ctx context.Context) *slog.Logger {
+	return telemetry.FromContext(ctx, h.Logger)
 }
 
 // resolveTenant calls the Tenant Config Service for hardcodedTenantID.

@@ -11,10 +11,16 @@
 # #15) — added on_failure: skip so a broker outage degrades the response
 # instead of fail_fast-ing a request whose score has already been
 # computed by this point.
+#
+# v4: added max_retries to the three enrichment nodes — timeout_ms was
+# already here but never enforced until this pass (see DECISIONS.md's
+# entry for the observability/resilience layer); a transient failure now
+# gets one retry, still bounded by the same timeout_ms per attempt,
+# before falling back to on_failure.
 tenant_id: acme_insurance
 product: auto
 event_type: claim.fnol
-version: 3
+version: 4
 timeout_ms: 250
 
 nodes:
@@ -22,18 +28,21 @@ nodes:
     service: claimant-id-hashing-svc
     group: enrichment
     timeout_ms: 40
+    max_retries: 1
     on_failure: fail_fast
 
   - id: address_normalize
     service: address-normalization-svc
     group: enrichment
     timeout_ms: 40
+    max_retries: 1
     on_failure: skip
 
   - id: policy_lookup
     service: policy-lookup-svc
     group: enrichment
     timeout_ms: 40
+    max_retries: 1
     on_failure: degrade
 
   - id: model_score

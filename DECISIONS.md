@@ -296,3 +296,89 @@ trained model artifact (versioned, per DESIGN.md §9, in S3), hot-swappable
 `model_version` resolved per tenant/product (same pattern as DAG
 versions), feature-level explanations actually exposed via the API rather
 than just logged.
+
+## 17. Observability/resilience layer: structured logging + DAG
+    timeout/retry, not the full DESIGN.md §11 stack
+
+**Decision:** this pass covers three things only: (1) a new shared Go
+module, `pkg/telemetry`, providing JSON logging (`log/slog`) and real
+`grpc.UnaryServerInterceptor`/`UnaryClientInterceptor` implementations —
+replacing every hand-rolled `log.Printf` and the ad-hoc metadata
+read/write code that used to live in `orchestration-service`'s server
+package and `claims-gateway`'s client package (both had comments
+admitting they were stand-ins for this); (2) the matching fix on the
+Java side — `logstash-logback-encoder` + a per-service
+`logback-spring.xml` (duplicated 3×, same pattern as
+`GrpcServerLifecycle.java`) plus real SLF4J + MDC logging in all three
+enrichment services' gRPC handlers, which previously had zero log calls
+at all; (3) DAG-level resilience in `orchestration-service/internal/dag`
+— `Node.TimeoutMs` (parsed from YAML since the walking skeleton but
+never enforced) is now wrapped around every downstream call via
+`context.WithTimeout`, and a new `Node.MaxRetries` field adds simple
+retry-with-fixed-backoff on transient failures, both before the existing
+`on_failure` (fail_fast/skip/degrade) policy applies.
+
+Not attempted this pass: OpenTelemetry tracing + Jaeger, Prometheus
+metrics/`/metrics` endpoints, Grafana dashboards, centralized log
+shipping (Loki/ELK), circuit breakers (open/half-open state — this is
+timeout+retry only), or mTLS (DESIGN.md §12, a security concern, not
+observability).
+
+**Why:** same "thin slice first" reasoning as #1/#3/#8/#12/#13/#15/#16 —
+DESIGN.md §11's full target (tracing + metrics + log aggregation, all
+across 7 services in 2 languages) is a multi-day effort on its own; this
+pass instead closes the two concrete gaps that had been flagged
+repeatedly across sessions without being picked up (tenant-config-svc's
+missing correlation ID/zero logging, and `timeout_ms` being parsed but
+never actually enforced) plus gives every service a consistent
+structured-logging foundation, without committing to a tracing/metrics
+backend before there's a second consumer of that data to justify it.
+
+**Consistency choice:** `tenant-config-svc` now receives
+`x-correlation-id` as gRPC metadata (via the new client interceptor
+whenever the caller's context carries one), not a new field on
+`tenant_config.proto`'s request messages — matches DECISIONS.md #4's
+existing metadata-first principle for Go-to-Go calls, rather than adding
+a second, inconsistent transport for the same data. The Java enrichment
+services keep their existing pattern unchanged (`correlation_id` as an
+explicit request-payload field, per DESIGN.md/DECISIONS.md #4's
+carve-out for those calls) — they just log it now, via MDC, instead of
+receiving it and doing nothing with it.
+
+**Retry scope kept deliberately simple:** `callWithResilience` retries
+on *any* error, not just gRPC codes that are actually safe to retry
+(`Unavailable`, `DeadlineExceeded`) — a real implementation would
+distinguish those from e.g. `InvalidArgument`, which retrying can't fix.
+Fixed-delay backoff (20ms), not exponential/jittered. Both are
+proportionate to this pass's scope; revisit if retries ever need to be
+safe against non-idempotent downstream effects (none of today's
+enrichment calls have any).
+
+**Two real bugs this pass's live testing surfaced, both fixed, neither
+hypothetical:**
+
+1. **Cold gRPC connections competed with the new timeouts.**
+   `grpc.NewClient` dials lazily, only on the first real RPC — fine when
+   nothing times that call out, but with `timeout_ms` now enforced, a
+   fresh restart's first request to each downstream service reliably
+   blew its budget on TCP/HTTP2 handshake + (for the Java services) JVM
+   cold-start alone, before any real work happened. Fixed by
+   `telemetry.WarmUp` (`pkg/telemetry/warmup.go`): every `Dial*`
+   function now calls `conn.Connect()` and blocks (up to 5s, logging a
+   warning rather than failing on timeout) for the connection to reach
+   `Ready` before the service starts serving traffic, so that cost is
+   paid once at startup instead of on every service's very first real
+   request.
+2. **kafka-go's `Writer` defaults `BatchTimeout` to 1 second.** Every
+   historical "~1 second" request duration recorded elsewhere in this
+   repo's docs (TC-01, TC-10) wasn't JVM/network overhead — it was this
+   default batch window, previously invisible because nothing timed the
+   publish call out. The DAG's `publish` node's own `timeout_ms: 100`
+   (present since the walking skeleton, just unenforced) made this
+   visible immediately: every publish failed on its first attempt, no
+   matter how healthy the broker was. Fixed by setting
+   `BatchTimeout: 10ms` on the `kafka-go.Writer` in
+   `internal/kafka/publisher.go` — `Publish()` sends one message per
+   call, not a real producer batch, so there's no reason to hold it
+   before flushing. Net effect: requests that used to take ~1-1.7s now
+   complete in well under 100ms.

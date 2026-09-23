@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 
+	"claimfraud/pkg/telemetry"
 	modelv1 "claimfraud/proto/gen/go/model/v1"
 	"claimfraud/services/model-service/internal/server"
 
@@ -16,15 +17,17 @@ import (
 func main() {
 	grpcAddr := getenv("MODEL_GRPC_ADDR", ":9093")
 
+	logger := telemetry.NewLogger("model-service")
+
 	lis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
 		log.Fatalf("listen on %s: %v", grpcAddr, err)
 	}
 
-	grpcServer := grpc.NewServer()
-	modelv1.RegisterModelServiceServer(grpcServer, &server.Server{})
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(telemetry.UnaryServerInterceptor(logger)))
+	modelv1.RegisterModelServiceServer(grpcServer, &server.Server{Logger: logger})
 
-	log.Printf("model-service (rules-based, not ML) listening on %s", grpcAddr)
+	logger.Info("model-service starting", "grpc_addr", grpcAddr, "scoring_mode", "rules-based")
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("model-service server failed: %v", err)
 	}

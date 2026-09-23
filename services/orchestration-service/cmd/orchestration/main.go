@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 
+	"claimfraud/pkg/telemetry"
 	orchestrationv1 "claimfraud/proto/gen/go/orchestration/v1"
 	"claimfraud/services/orchestration-service/internal/client"
 	"claimfraud/services/orchestration-service/internal/dag"
@@ -30,31 +31,33 @@ func main() {
 	kafkaBrokerAddr := getenv("KAFKA_BROKER_ADDR", "localhost:19092")
 	dagConfigDir := getenv("DAG_CONFIG_DIR", "../../config/dag")
 
-	tenantConfig, err := client.DialTenantConfig(tenantConfigAddr)
+	logger := telemetry.NewLogger("orchestration-service")
+
+	tenantConfig, err := client.DialTenantConfig(tenantConfigAddr, logger)
 	if err != nil {
 		log.Fatalf("dial tenant-config-svc at %s: %v", tenantConfigAddr, err)
 	}
 	defer tenantConfig.Close()
 
-	addressNorm, err := client.DialAddressNorm(addressNormAddr)
+	addressNorm, err := client.DialAddressNorm(addressNormAddr, logger)
 	if err != nil {
 		log.Fatalf("dial address-normalization-svc at %s: %v", addressNormAddr, err)
 	}
 	defer addressNorm.Close()
 
-	claimantIDHash, err := client.DialClaimantIDHash(claimantIDHashAddr)
+	claimantIDHash, err := client.DialClaimantIDHash(claimantIDHashAddr, logger)
 	if err != nil {
 		log.Fatalf("dial claimant-id-hashing-svc at %s: %v", claimantIDHashAddr, err)
 	}
 	defer claimantIDHash.Close()
 
-	policyLookup, err := client.DialPolicyLookup(policyLookupAddr)
+	policyLookup, err := client.DialPolicyLookup(policyLookupAddr, logger)
 	if err != nil {
 		log.Fatalf("dial policy-lookup-svc at %s: %v", policyLookupAddr, err)
 	}
 	defer policyLookup.Close()
 
-	model, err := client.DialModel(modelAddr)
+	model, err := client.DialModel(modelAddr, logger)
 	if err != nil {
 		log.Fatalf("dial model-service at %s: %v", modelAddr, err)
 	}
@@ -68,12 +71,14 @@ func main() {
 			Loader: &dag.Loader{
 				TenantConfig: tenantConfig,
 				ConfigDir:    dagConfigDir,
+				Logger:       logger,
 			},
 			AddressNorm:    addressNorm,
 			ClaimantIDHash: claimantIDHash,
 			PolicyLookup:   policyLookup,
 			Model:          model,
 			Publisher:      publisher,
+			Logger:         logger,
 		},
 	}
 
@@ -82,11 +87,13 @@ func main() {
 		log.Fatalf("listen on %s: %v", grpcAddr, err)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(telemetry.UnaryServerInterceptor(logger)))
 	orchestrationv1.RegisterOrchestrationServiceServer(grpcServer, srv)
 
-	log.Printf("orchestration-service listening on %s (address-norm=%s, claimant-id-hash=%s, policy-lookup=%s, model=%s, tenant-config=%s, kafka-broker=%s, dag-config-dir=%s)",
-		grpcAddr, addressNormAddr, claimantIDHashAddr, policyLookupAddr, modelAddr, tenantConfigAddr, kafkaBrokerAddr, dagConfigDir)
+	logger.Info("orchestration-service starting",
+		"grpc_addr", grpcAddr, "address_norm_addr", addressNormAddr, "claimant_id_hash_addr", claimantIDHashAddr,
+		"policy_lookup_addr", policyLookupAddr, "model_addr", modelAddr, "tenant_config_addr", tenantConfigAddr,
+		"kafka_broker_addr", kafkaBrokerAddr, "dag_config_dir", dagConfigDir)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("orchestration-service server failed: %v", err)
 	}

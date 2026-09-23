@@ -193,18 +193,23 @@ TC-02)
 fields — `rpc error: code = NotFound desc = tenant "acme_insuranc" not
 found`.
 
-**Worth knowing**: this request produces **no server-side log line at
-all**, success or error — same cause as TC-03b's note (`tenant-config-svc`
-has zero `log.Printf` calls in either RPC handler). The gRPC error is
-visible in the console's Response panel regardless; `logs/tenant-config-svc.log`
-stays empty either way.
+**Worth knowing (stale as of the observability/resilience pass, kept for
+history — see DECISIONS.md #17)**: this request used to produce **no
+server-side log line at all**, success or error — same cause as TC-03b's
+note (`tenant-config-svc` had zero `log.Printf` calls in either RPC
+handler). That's fixed now: the server logs a `WARN "get tenant: not
+found"` line via the shared structured logger, and `x-correlation-id`
+metadata now actually reaches this service (previously it never did) —
+expect `logs/tenant-config-svc.log` to have a line for this request the
+next time this test case is run, not stay empty.
 
 **Last verified**: 2026-09-14 — re-run live via the console's gRPC panel
 with a different unknown `tenant_id` (`"fake_insurance_insurance-tenant"`),
 got the expected `NotFound` error, and confirmed live via a tailed
 `tenant-config-svc.log` panel that nothing was written to the log ("No
-lines yet"). ✅ (Originally ad-hoc tested 2026-09-11 alongside TC-02;
-formalized as its own test case 2026-09-14.)
+lines yet"). ✅ **Predates DECISIONS.md #17** — the empty-log observation
+was correct at the time but no longer holds; not yet re-run since the
+logging fix landed.
 
 ---
 
@@ -224,11 +229,14 @@ as TC-02)
 {"tenant_id": "acme_insurance", "product": "auto"}
 ```
 
-**Expected response**: `{"version": 3}` — matches
-`config/tenants.yaml`'s `dag_versions.auto`.
+**Expected response**: `{"version": 4}` — matches
+`config/tenants.yaml`'s `dag_versions.auto` (bumped 3→4 when
+`max_retries` was added to `claim.fnol.yaml`'s enrichment nodes — see
+DECISIONS.md #17).
 
 **Last verified**: 2026-09-14 — re-run live via the console's gRPC panel,
-`{"version":3}`, matching the corrected expected value exactly. ✅
+`{"version":3}`, matching the corrected expected value exactly at the
+time. ✅ **Stale** — predates the 3→4 bump above, not yet re-run.
 (Previously verified 2026-09-11 at `{"version":2}`, before
 `dag_versions.auto` was bumped 2→3 alongside the Kafka publish work — see
 DECISIONS.md #15.)
@@ -265,13 +273,13 @@ rejecting the request at the framing level)
 map-lookup miss as any other unconfigured value — see
 `internal/server/tenantconfig.go`'s `GetDagVersion`).
 
-**Worth knowing**: this request produces **no server-side log line at
-all**, success or error — `tenant-config-svc` has zero `log.Printf` calls
-in either RPC handler (unlike ClaimsGateway, which at least logs its
-error branches). The gRPC error above is visible in the console's
-Response panel regardless; it just won't show up in
-`logs/tenant-config-svc.log`. See the 2026-09-14 note below for the
-broader logging gap this surfaces.
+**Worth knowing (stale as of the observability/resilience pass, kept for
+history — see DECISIONS.md #17)**: this request used to produce **no
+server-side log line at all**, success or error — `tenant-config-svc`
+had zero `log.Printf` calls in either RPC handler (unlike ClaimsGateway,
+which at least logged its error branches). Fixed now: the server logs a
+`WARN "get dag version: not found"` line. See the 2026-09-14 note below
+for the original discovery of this gap, and DECISIONS.md #17 for the fix.
 
 **Last verified**: 2026-09-14 — re-run live via the console's gRPC panel,
 got the exact predicted error verbatim: `rpc error: code = NotFound desc
@@ -637,6 +645,81 @@ Troubleshooting — `rpk` inside the container can't resolve its own
 partition=0 offset=0 key=acme_insurance value={"claim_id":"clm-kafka-verify-1","correlation_id":"f69262a450328a7ea56d9c90d56f172b","tenant_id":"acme_insurance","status":"scored","fraud_score":0.42,"model_version":"stub-v0"}
 partition=0 offset=1 key=acme_insurance value={"claim_id":"clm-kafka-verify-2","correlation_id":"abd3ece941f4e56d5edb0bb27dcc6746","tenant_id":"acme_insurance","status":"scored","fraud_score":0.42,"model_version":"stub-v0"}
 ```
+
+---
+
+## TC-11 — Orchestration: a stopped downstream service degrades within
+     bounded time, not indefinitely
+
+New as of the observability/resilience pass (DECISIONS.md #17): proves
+`Node.TimeoutMs` — parsed from `claim.fnol.yaml` since the walking
+skeleton, but never actually enforced until now — really bounds a
+downstream call, and that `max_retries: 1` really retries once before
+`on_failure` takes over. Not a new protocol/endpoint (reuses TC-01's
+REST path); the point is *timing*, not the response shape.
+
+**Protocol**: REST (same endpoint as TC-01 — `POST /v1/claims` via
+ClaimsGateway, `localhost:8080`)
+
+**Endpoint**: `POST /v1/claims`
+
+**Port**: `localhost:8080`
+
+**Payload**: same as TC-01's.
+
+**Steps**:
+1. With the full stack up, stop `policy-lookup-svc` only (Ctrl+C its
+   terminal, or kill its PID if started via `scripts/start-all.sh` — see
+   RUNBOOK.md step 6 for how to find it, e.g. `Get-NetTCPConnection
+   -LocalPort 9096`). Leave the other 6 services + broker running.
+2. Submit a claim (TC-01's payload works as-is) and time the request.
+3. Check `logs/orchestration-service.log` for the `policy_lookup` node's
+   outcome.
+
+**Expected response**: `200`, completing in roughly bounded time — with
+`policy_lookup`'s `timeout_ms: 40` and `max_retries: 1`, each of the (up
+to) 2 attempts is capped at 40ms, so the node itself resolves in well
+under 200ms regardless of how long a truly-down service would otherwise
+be dialed against (gRPC's own connection-refused failure is typically
+fast, but the *timeout enforcement* is what's being proven, not just
+that a downed service errors quickly — see DECISIONS.md #17). `status:
+"degraded"` (policy_lookup's `on_failure: degrade`), `fraud_score` still
+present (model scoring still runs on the remaining features).
+`logs/orchestration-service.log` shows two attempts at the `policy_lookup`
+node (the retry) before a `"msg":"dag node failed, continuing"` line with
+`"node":"policy_lookup","on_failure":"degrade"`.
+
+**Last verified**: 2026-09-23 — stopped `policy-lookup-svc` (`Stop-Process`
+on its PID), submitted a fresh claim: `200`, **39ms total**,
+`status:"degraded"`, `fraud_score:0.4`. ✅ `logs/orchestration-service.log`
+showed exactly 2 attempts at `policy_lookup` (both fast
+`Unavailable`/connection-refused errors, ~0-1ms each — the target process
+was gone, not slow), then `"dag node failed, continuing"` with
+`"node":"policy_lookup","on_failure":"degrade"`, then `model_score` and
+`publish` both completed normally. Confirms `max_retries` and the
+on_failure policy both fire correctly, and — the actual point of this
+test case — the whole request resolved in well under a second instead of
+hanging. (Restarted `policy-lookup-svc` afterward to restore the full
+stack; confirmed `status:"scored"` again once its gRPC client connection
+reconnected — see the note on connection backoff below.)
+
+**Note on the two real bugs this test case's own dev pass surfaced and
+fixed** (kept here since they were found *while building* the
+timeout/retry enforcement this test case exercises, not by running TC-11
+itself): (1) `grpc.NewClient` dials lazily on the first real RPC, so a
+cold connection's handshake used to compete with a node's `timeout_ms`
+on the very first request after a fresh restart — fixed by
+`telemetry.WarmUp` blocking (up to 5s) for the connection to reach
+`Ready` before the service starts serving. (2) kafka-go's `Writer`
+defaults to a 1-second `BatchTimeout` — every historical "~1s" TC-01/
+TC-10 duration in this file was actually that default batch window, not
+JVM/network overhead; fixed by setting `BatchTimeout: 10ms` on the
+writer, since `Publish()` sends one message at a time, not a real
+producer batch. Both are documented in DECISIONS.md #17. A downstream
+service that goes down and comes back **after** orchestration-service's
+own client already connected still takes a few seconds to recover (gRPC
+client reconnect backoff, not something `WarmUp` — a one-time,
+dial-time-only check — addresses); expected, not a bug.
 
 ---
 

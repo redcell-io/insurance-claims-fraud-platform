@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  JSON console logging, replacing Spring Boot's plain-text default —
+  same shape as the Go services' pkg/telemetry logger (one JSON object
+  per line, service/correlation_id always present when known). See
+  DECISIONS.md's entry for this observability/resilience pass.
+-->
+<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <includeMdcKeyName>correlation_id</includeMdcKeyName>
+            <customFields>{"service":"policy-lookup-svc"}</customFields>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="STDOUT"/>
+    </root>
+</configuration>

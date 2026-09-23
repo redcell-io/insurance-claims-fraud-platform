@@ -44,18 +44,23 @@ listed in go.work`), since the repo root itself isn't a workspace member.
 Either `cd` into each module or path-prefix from the root:
 
 ```sh
-cd services/tenant-config-svc      && go build ./... && go vet ./...
+cd pkg/telemetry                     && go build ./... && go vet ./...
+cd ../../services/tenant-config-svc  && go build ./... && go vet ./...
 cd ../claims-gateway                 && go build ./... && go vet ./...
 cd ../orchestration-service           && go build ./... && go vet ./...
 cd ../model-service                    && go build ./... && go vet ./...
 ```
 
-All four should exit with no output.
+All five should exit with no output. `pkg/telemetry` is the shared
+JSON-logging/gRPC-interceptor module every Go service imports (see step
+5's note on log format) — not independently deployable like the other
+four, but still its own `go.work` member, same as `proto/gen/go`.
 
 ## 3. Run unit tests
 
 **Go** — currently only `orchestration-service/internal/dag` has real tests
-(config/executor logic: `on_failure`, `enabled_for`, staged execution).
+(config/executor logic: `on_failure`, `enabled_for`, staged execution,
+plus per-node `timeout_ms` enforcement and `max_retries` retry behavior).
 Extend this list as more packages get tests:
 
 ```sh
@@ -169,17 +174,33 @@ Expected response:
 {"claim_id":"clm-0001","correlation_id":"<generated>","status":"scored","normalized_address":"123 MAIN ST, SPRINGFIELD, IL, 62704, US","fraud_score":0.05,"model_version":"rules-v1"}
 ```
 
+Every service's logs (all 7, plus the `logs/*.log` files
+`scripts/start-all.sh` writes) are now one structured JSON object per
+line — `service`, `correlation_id`, `tenant_id` (when known), `msg`,
+plus whatever fields that log call added, e.g. `node`/`on_failure` for a
+DAG node failure. Previously plain `log.Printf` text (Go) or nothing at
+all (the 3 Java enrichment services and tenant-config-svc, which used to
+log zero lines on any path — see DECISIONS.md's entry for this
+observability pass). `tail -f logs/*.log | jq .` (or any JSON-aware log
+viewer) reads better than raw `tail -f` now.
+
 Orchestration's logs will show `claimant_id_hash`, `address_normalize`, and
 `policy_lookup` all running (see [docs/dag-request-flow.md](docs/dag-request-flow.md))
 — if any of the three new/existing enrichment services isn't up yet, the DAG
 config's `on_failure` policy decides what happens: `claimant_id_hash` is
 `fail_fast` (whole request fails), `address_normalize` is `skip`, and
 `policy_lookup` is `degrade` (both of the latter two let the request
-continue with `status: degraded`). The `publish` node (real Kafka publish
-to `claims.realtime` as of DECISIONS.md #15) is `on_failure: skip` too —
-if the broker from step 4a isn't up, the log will show `dag node=publish
-failed, continuing (on_failure=skip)` and the response comes back
-`status: "degraded"` rather than failing outright.
+continue with `status: degraded`) — each is retried once first
+(`max_retries: 1` in `claim.fnol.yaml`) before `on_failure` applies. The
+`publish` node (real Kafka publish to `claims.realtime` as of
+DECISIONS.md #15) is `on_failure: skip` too — if the broker from step 4a
+isn't up, the log will show a `"msg":"dag node failed, continuing"` line
+with `"node":"publish","on_failure":"skip"`, and the response comes back
+`status: "degraded"` rather than failing outright. Every downstream call
+is also now bounded by `timeout_ms` (`context.WithTimeout`, previously
+parsed from YAML but never enforced) instead of being able to hang
+indefinitely — see [docs/manual-test-cases.md](docs/manual-test-cases.md)
+TC-11 for a live demonstration.
 
 To confirm a scored claim actually reached the broker, either consume
 `claims.realtime` directly (`docker exec claimfraud-broker rpk topic

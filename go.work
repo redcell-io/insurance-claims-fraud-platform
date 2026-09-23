@@ -1,6 +1,7 @@
 go 1.25.0
 
 use (
+	./pkg/telemetry
 	./proto/gen/go
 	./services/claims-gateway
 	./services/model-service

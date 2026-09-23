@@ -8,21 +8,23 @@ package server
 
 import (
 	"context"
-	"log"
+	"log/slog"
 
 	modelv1 "claimfraud/proto/gen/go/model/v1"
 
+	"claimfraud/pkg/telemetry"
 	"claimfraud/services/model-service/internal/scoring"
 )
 
 type Server struct {
 	modelv1.UnimplementedModelServiceServer
+	Logger *slog.Logger
 }
 
 func (s *Server) Score(ctx context.Context, req *modelv1.ScoreRequest) (*modelv1.ScoreResponse, error) {
 	score, explanations := scoring.Score(req.GetFeatures())
 
-	log.Printf("correlation_id=%s score=%.2f reasons=%v", req.GetCorrelationId(), score, explanations)
+	telemetry.FromContext(ctx, s.Logger).Info("scored claim", "score", score, "reasons", explanations)
 
 	return &modelv1.ScoreResponse{
 		Score:        score,

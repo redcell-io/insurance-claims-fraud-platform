@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 
+	"claimfraud/pkg/telemetry"
 	tenantconfigv1 "claimfraud/proto/gen/go/tenantconfig/v1"
 	"claimfraud/services/tenant-config-svc/internal/server"
 	"claimfraud/services/tenant-config-svc/internal/store"
@@ -22,6 +23,8 @@ func main() {
 	grpcAddr := getenv("TENANT_CONFIG_GRPC_ADDR", ":9094")
 	tenantsFile := getenv("TENANTS_FILE", "../../config/tenants.yaml")
 
+	logger := telemetry.NewLogger("tenant-config-svc")
+
 	st, err := store.Load(tenantsFile)
 	if err != nil {
 		log.Fatalf("load tenants file %s: %v", tenantsFile, err)
@@ -32,10 +35,10 @@ func main() {
 		log.Fatalf("listen on %s: %v", grpcAddr, err)
 	}
 
-	grpcServer := grpc.NewServer()
-	tenantconfigv1.RegisterTenantConfigServiceServer(grpcServer, &server.Server{Store: st})
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(telemetry.UnaryServerInterceptor(logger)))
+	tenantconfigv1.RegisterTenantConfigServiceServer(grpcServer, &server.Server{Store: st, Logger: logger})
 
-	log.Printf("tenant-config-svc listening on %s (tenants file=%s)", grpcAddr, tenantsFile)
+	logger.Info("tenant-config-svc starting", "grpc_addr", grpcAddr, "tenants_file", tenantsFile)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("tenant-config-svc server failed: %v", err)
 	}

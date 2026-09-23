@@ -4,10 +4,9 @@ package server
 import (
 	"context"
 
+	"claimfraud/pkg/telemetry"
 	orchestrationv1 "claimfraud/proto/gen/go/orchestration/v1"
 	"claimfraud/services/orchestration-service/internal/dag"
-
-	"google.golang.org/grpc/metadata"
 )
 
 // Server implements orchestrationv1.OrchestrationServiceServer.
@@ -16,11 +15,15 @@ type Server struct {
 	Executor *dag.Executor
 }
 
+// ProcessClaim reads tenant_id/correlation_id off ctx — populated by
+// telemetry.UnaryServerInterceptor from incoming x-tenant-id/
+// x-correlation-id metadata (DESIGN.md §8), the real interceptor this
+// used to hand-roll via a local firstMetadataValue helper.
 func (s *Server) ProcessClaim(ctx context.Context, req *orchestrationv1.ProcessClaimRequest) (*orchestrationv1.ProcessClaimResponse, error) {
-	tenantID := firstMetadataValue(ctx, "x-tenant-id")
+	tenantID := telemetry.TenantIDFrom(ctx)
 	correlationID := req.GetClaim().GetCorrelationId()
 	if correlationID == "" {
-		correlationID = firstMetadataValue(ctx, "x-correlation-id")
+		correlationID = telemetry.CorrelationIDFrom(ctx)
 	}
 
 	result, err := s.Executor.Run(ctx, tenantID, correlationID, req.GetClaim())
@@ -36,20 +39,4 @@ func (s *Server) ProcessClaim(ctx context.Context, req *orchestrationv1.ProcessC
 		FraudScore:        result.FraudScore,
 		ModelVersion:      result.ModelVersion,
 	}, nil
-}
-
-// firstMetadataValue reads a value out of incoming gRPC metadata. This
-// stands in for the real tenant-context interceptor described in
-// DESIGN.md §8 — good enough for the walking skeleton, where the DAG
-// itself is hardcoded regardless of tenant.
-func firstMetadataValue(ctx context.Context, key string) string {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return ""
-	}
-	vals := md.Get(key)
-	if len(vals) == 0 {
-		return ""
-	}
-	return vals[0]
 }

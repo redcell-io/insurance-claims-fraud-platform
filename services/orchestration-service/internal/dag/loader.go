@@ -3,9 +3,11 @@ package dag
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
+
+	"claimfraud/pkg/telemetry"
 
 	"gopkg.in/yaml.v3"
 )
@@ -26,6 +28,7 @@ type DagVersionResolver interface {
 type Loader struct {
 	TenantConfig DagVersionResolver
 	ConfigDir    string // e.g. "../../config/dag"
+	Logger       *slog.Logger
 }
 
 // Load reads config/dag/{tenantID}/{product}/{eventType}.yaml, after
@@ -54,7 +57,7 @@ func (l *Loader) Load(ctx context.Context, tenantID, product, eventType string) 
 		// file per (tenant,product,eventType) on disk in this pass, so a
 		// mismatch just means the file is stale relative to tenant config.
 		// Log and proceed with the file's own version rather than failing.
-		log.Printf("dag config %s: file version=%d does not match tenant-config version=%d", path, cfg.Version, wantVersion)
+		telemetry.FromContext(ctx, l.Logger).Warn("dag config file version mismatch", "path", path, "file_version", cfg.Version, "tenant_config_version", wantVersion)
 	}
 
 	return &cfg, nil

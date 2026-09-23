@@ -3,7 +3,10 @@ package client
 
 import (
 	"context"
+	"log/slog"
+	"time"
 
+	"claimfraud/pkg/telemetry"
 	tenantconfigv1 "claimfraud/proto/gen/go/tenantconfig/v1"
 
 	"google.golang.org/grpc"
@@ -17,12 +20,20 @@ type TenantConfigClient struct {
 	rpc  tenantconfigv1.TenantConfigServiceClient
 }
 
-// DialTenantConfig connects to the Tenant Config Service at addr (host:port).
-func DialTenantConfig(addr string) (*TenantConfigClient, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+// DialTenantConfig connects to the Tenant Config Service at addr
+// (host:port). Every call carries correlation_id as gRPC metadata
+// automatically whenever ctx has one set (telemetry.UnaryClientInterceptor)
+// — this is what gives tenant-config-svc a correlation ID at all, closing
+// the gap flagged in DECISIONS.md's TC-03b build note.
+func DialTenantConfig(addr string, logger *slog.Logger) (*TenantConfigClient, error) {
+	conn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(telemetry.UnaryClientInterceptor(logger)),
+	)
 	if err != nil {
 		return nil, err
 	}
+	telemetry.WarmUp(conn, logger, addr, 5*time.Second)
 	return &TenantConfigClient{
 		conn: conn,
 		rpc:  tenantconfigv1.NewTenantConfigServiceClient(conn),

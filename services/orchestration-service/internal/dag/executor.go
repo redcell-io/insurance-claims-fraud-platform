@@ -3,11 +3,13 @@ package dag
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
+	"time"
 
 	claimsv1 "claimfraud/proto/gen/go/claims/v1"
 
+	"claimfraud/pkg/telemetry"
 	addressnormv1 "claimfraud/proto/gen/go/addressnorm/v1"
 	claimantidhashv1 "claimfraud/proto/gen/go/claimantidhash/v1"
 	modelv1 "claimfraud/proto/gen/go/model/v1"
@@ -68,12 +70,28 @@ type Executor struct {
 	PolicyLookup   PolicyLookuper
 	Model          Scorer
 	Publisher      kafka.Publisher
+	Logger         *slog.Logger
 }
 
 const groupEnrichment = "enrichment"
 const nodeModelScore = "model_score"
 
+// defaultNodeTimeout bounds a downstream call when neither the node's own
+// timeout_ms nor its DAG's timeout_ms is set, so a config that omits both
+// still can't hang forever — "trained-in defaults, not nulls" (DESIGN.md
+// §9) applied to timeouts, not just feature values.
+const defaultNodeTimeout = 500 * time.Millisecond
+
+// retryBackoff is the fixed delay between retry attempts. Kept simple —
+// no exponential backoff/jitter — proportionate to this pass's scope; see
+// DECISIONS.md's entry for this layer.
+const retryBackoff = 20 * time.Millisecond
+
 func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, claim *claimsv1.ClaimEvent) (*Result, error) {
+	ctx = telemetry.WithCorrelationID(ctx, correlationID)
+	ctx = telemetry.WithTenantID(ctx, tenantID)
+	logger := telemetry.FromContext(ctx, e.Logger)
+
 	cfg, err := e.Loader.Load(ctx, tenantID, claim.GetProduct(), claim.GetEventType())
 	if err != nil {
 		return nil, fmt.Errorf("load dag config: %w", err)
@@ -97,9 +115,11 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 		}
 		switch node.Service {
 		case "claimant-id-hashing-svc":
-			hashResp, err := e.ClaimantIDHash.Hash(ctx, correlationID, claim.GetClaimantName())
+			hashResp, err := callWithResilience(ctx, cfg, node, func(ctx context.Context) (*claimantidhashv1.HashClaimantIdResponse, error) {
+				return e.ClaimantIDHash.Hash(ctx, correlationID, claim.GetClaimantName())
+			})
 			if err != nil {
-				if !nodeFailureHandled(node, correlationID, err) {
+				if !nodeFailureHandled(logger, node, err) {
 					return nil, err
 				}
 				status = "degraded"
@@ -107,9 +127,11 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 			}
 			claimantIDHash = hashResp.GetClaimantIdHash()
 		case "address-normalization-svc":
-			normResp, err := e.AddressNorm.Normalize(ctx, correlationID, claim.GetRawAddress())
+			normResp, err := callWithResilience(ctx, cfg, node, func(ctx context.Context) (*addressnormv1.NormalizeResponse, error) {
+				return e.AddressNorm.Normalize(ctx, correlationID, claim.GetRawAddress())
+			})
 			if err != nil {
-				if !nodeFailureHandled(node, correlationID, err) {
+				if !nodeFailureHandled(logger, node, err) {
 					return nil, err
 				}
 				status = "degraded"
@@ -122,9 +144,11 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 			// number), not a call failure — on_failure only applies to the
 			// RPC itself erroring out, so this doesn't go through
 			// nodeFailureHandled.
-			lookupResp, err := e.PolicyLookup.Lookup(ctx, correlationID, claim.GetPolicyNumber())
+			lookupResp, err := callWithResilience(ctx, cfg, node, func(ctx context.Context) (*policylookupv1.LookupPolicyResponse, error) {
+				return e.PolicyLookup.Lookup(ctx, correlationID, claim.GetPolicyNumber())
+			})
 			if err != nil {
-				if !nodeFailureHandled(node, correlationID, err) {
+				if !nodeFailureHandled(logger, node, err) {
 					return nil, err
 				}
 				status = "degraded"
@@ -133,7 +157,7 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 			policyStatus = lookupResp.GetStatus()
 			policyCoverageType = lookupResp.GetCoverageType()
 		default:
-			log.Printf("correlation_id=%s dag node=%s: unrecognized service %q, skipping", correlationID, node.ID, node.Service)
+			logger.Warn("unrecognized dag node service, skipping", "node", node.ID, "service", node.Service)
 		}
 	}
 
@@ -160,16 +184,18 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 				"policy_coverage_type": policyCoverageType,
 				"address_valid":        strconv.FormatBool(addressValid),
 			}
-			resp, err := e.Model.Score(ctx, correlationID, features)
+			resp, err := callWithResilience(ctx, cfg, node, func(ctx context.Context) (*modelv1.ScoreResponse, error) {
+				return e.Model.Score(ctx, correlationID, features)
+			})
 			if err != nil {
-				if !nodeFailureHandled(node, correlationID, err) {
+				if !nodeFailureHandled(logger, node, err) {
 					return nil, err
 				}
 				continue
 			}
 			scoreResp = resp
 		default:
-			log.Printf("correlation_id=%s dag node=%s: unrecognized service %q, skipping", correlationID, node.ID, node.Service)
+			logger.Warn("unrecognized dag node service, skipping", "node", node.ID, "service", node.Service)
 		}
 	}
 	if scoreResp == nil {
@@ -195,17 +221,19 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 				FraudScore:    scoreResp.GetScore(),
 				ModelVersion:  scoreResp.GetModelVersion(),
 			}
-			if err := e.Publisher.Publish(ctx, event); err != nil {
-				if !nodeFailureHandled(node, correlationID, err) {
+			_, err := callWithResilience(ctx, cfg, node, func(ctx context.Context) (struct{}, error) {
+				return struct{}{}, e.Publisher.Publish(ctx, event)
+			})
+			if err != nil {
+				if !nodeFailureHandled(logger, node, err) {
 					return nil, err
 				}
 				status = "degraded"
 				continue
 			}
-			log.Printf("correlation_id=%s tenant_id=%s claim_id=%s published to %s",
-				correlationID, tenantID, claim.GetClaimId(), kafka.TopicClaimsRealtime)
+			logger.Info("published to kafka", "topic", kafka.TopicClaimsRealtime, "claim_id", claim.GetClaimId())
 		default:
-			log.Printf("correlation_id=%s dag node=%s: unrecognized service %q, skipping", correlationID, node.ID, node.Service)
+			logger.Warn("unrecognized dag node service, skipping", "node", node.ID, "service", node.Service)
 		}
 	}
 
@@ -215,6 +243,49 @@ func (e *Executor) Run(ctx context.Context, tenantID, correlationID string, clai
 		FraudScore:        scoreResp.GetScore(),
 		ModelVersion:      scoreResp.GetModelVersion(),
 	}, nil
+}
+
+// callWithResilience runs fn under a per-attempt timeout (nodeTimeout),
+// retrying up to node.MaxRetries times on any error with a fixed backoff
+// between attempts. This is the enforcement side of the timeout_ms/
+// max_retries fields Config/Node already carry — previously parsed from
+// YAML but never actually applied to a call.
+func callWithResilience[T any](ctx context.Context, cfg *Config, node Node, fn func(context.Context) (T, error)) (T, error) {
+	timeout := nodeTimeout(cfg, node)
+	var zero T
+	var lastErr error
+
+	for attempt := 0; attempt <= int(node.MaxRetries); attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+		resp, err := fn(attemptCtx)
+		cancel()
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+
+		if attempt < int(node.MaxRetries) {
+			select {
+			case <-time.After(retryBackoff):
+			case <-ctx.Done():
+				return zero, ctx.Err()
+			}
+		}
+	}
+	return zero, lastErr
+}
+
+// nodeTimeout resolves the per-attempt timeout for node: its own
+// timeout_ms if set, else the DAG's own timeout_ms, else
+// defaultNodeTimeout.
+func nodeTimeout(cfg *Config, node Node) time.Duration {
+	if node.TimeoutMs > 0 {
+		return time.Duration(node.TimeoutMs) * time.Millisecond
+	}
+	if cfg.TimeoutMs > 0 {
+		return time.Duration(cfg.TimeoutMs) * time.Millisecond
+	}
+	return defaultNodeTimeout
 }
 
 func dependsOn(node Node, name string) bool {
@@ -232,14 +303,14 @@ func dependsOn(node Node, name string) bool {
 // "continue, best-effort" here — DESIGN.md §6.1 distinguishes them, but
 // this repo doesn't yet have a node where the difference in downstream
 // behavior matters, so both simply mark the overall result "degraded".
-func nodeFailureHandled(node Node, correlationID string, err error) bool {
+func nodeFailureHandled(logger *slog.Logger, node Node, err error) bool {
 	policy := node.EffectiveOnFailure()
 	switch policy {
 	case OnFailureSkip, OnFailureDegrade:
-		log.Printf("correlation_id=%s dag node=%s failed, continuing (on_failure=%s): %v", correlationID, node.ID, policy, err)
+		logger.Warn("dag node failed, continuing", "node", node.ID, "on_failure", policy, "error", err)
 		return true
 	default: // fail_fast
-		log.Printf("correlation_id=%s dag node=%s failed (on_failure=fail_fast): %v", correlationID, node.ID, err)
+		logger.Error("dag node failed", "node", node.ID, "on_failure", policy, "error", err)
 		return false
 	}
 }

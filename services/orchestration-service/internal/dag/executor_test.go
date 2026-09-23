@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	addressnormv1 "claimfraud/proto/gen/go/addressnorm/v1"
 	claimantidhashv1 "claimfraud/proto/gen/go/claimantidhash/v1"
@@ -315,5 +316,98 @@ func TestExecutorRunSkipsNodeNotEnabledForTenant(t *testing.T) {
 	}
 	if result.NormalizedAddress != "untouched raw address" {
 		t.Errorf("NormalizedAddress = %q, want raw address unchanged", result.NormalizedAddress)
+	}
+}
+
+// slowAddressNorm blocks until its ctx is cancelled — used to prove a
+// node's timeout_ms is actually enforced (callWithResilience) rather
+// than parsed-and-ignored, which was the case before this pass.
+type slowAddressNorm struct {
+	callCount int
+}
+
+func (f *slowAddressNorm) Normalize(ctx context.Context, correlationID, rawAddress string) (*addressnormv1.NormalizeResponse, error) {
+	f.callCount++
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestExecutorRunNodeTimeoutIsEnforced(t *testing.T) {
+	cfg := testConfig()
+	nodeByID(t, cfg, "address_normalize").TimeoutMs = 5 // small so the test stays fast
+
+	slow := &slowAddressNorm{}
+	e := &Executor{
+		Loader:         &fakeConfigLoader{cfg: cfg},
+		AddressNorm:    slow,
+		ClaimantIDHash: successfulClaimantIDHash(),
+		PolicyLookup:   successfulPolicyLookup(),
+		Model:          &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.1, ModelVersion: "v1"}},
+		Publisher:      successfulPublisher(),
+	}
+	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol", RawAddress: "raw"}
+
+	start := time.Now()
+	result, err := e.Run(context.Background(), "acme_insurance", "corr-timeout", claim)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil (address_normalize's on_failure=skip should not fail the run)", err)
+	}
+	if result.Status != "degraded" {
+		t.Errorf("Status = %q, want %q (a timed-out node should degrade the result)", result.Status, "degraded")
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Errorf("Run() took %v, want well under 200ms — a node with timeout_ms=5 should bound the call instead of blocking forever", elapsed)
+	}
+	if slow.callCount != 1 {
+		t.Errorf("Normalize called %d times, want 1 (testConfig's address_normalize node has max_retries=0)", slow.callCount)
+	}
+}
+
+// flakyPolicyLookup fails a fixed number of times before succeeding —
+// used to prove max_retries actually retries rather than giving up on
+// the first transient error.
+type flakyPolicyLookup struct {
+	failuresBeforeSuccess int
+	callCount             int
+	successResp           *policylookupv1.LookupPolicyResponse
+}
+
+func (f *flakyPolicyLookup) Lookup(ctx context.Context, correlationID, policyNumber string) (*policylookupv1.LookupPolicyResponse, error) {
+	f.callCount++
+	if f.callCount <= f.failuresBeforeSuccess {
+		return nil, errors.New("transient failure")
+	}
+	return f.successResp, nil
+}
+
+func TestExecutorRunRetriesTransientFailureIntoSuccess(t *testing.T) {
+	cfg := testConfig()
+	nodeByID(t, cfg, "policy_lookup").MaxRetries = 2
+
+	flaky := &flakyPolicyLookup{
+		failuresBeforeSuccess: 2,
+		successResp:           &policylookupv1.LookupPolicyResponse{Found: true, Status: "active", CoverageType: "full"},
+	}
+	e := &Executor{
+		Loader:         &fakeConfigLoader{cfg: cfg},
+		AddressNorm:    &fakeAddressNorm{resp: &addressnormv1.NormalizeResponse{NormalizedAddress: "x"}},
+		ClaimantIDHash: successfulClaimantIDHash(),
+		PolicyLookup:   flaky,
+		Model:          &fakeScorer{resp: &modelv1.ScoreResponse{Score: 0.1, ModelVersion: "v1"}},
+		Publisher:      successfulPublisher(),
+	}
+	claim := &claimsv1.ClaimEvent{ClaimId: "clm-1", Product: "auto", EventType: "claim.fnol", PolicyNumber: "POL-123456"}
+
+	result, err := e.Run(context.Background(), "acme_insurance", "corr-retry", claim)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil (should succeed after retries exhaust the transient failures)", err)
+	}
+	if result.Status != "scored" {
+		t.Errorf("Status = %q, want %q (a retry that eventually succeeds should not degrade the result)", result.Status, "scored")
+	}
+	if flaky.callCount != 3 {
+		t.Errorf("Lookup called %d times, want 3 (2 failures + 1 success, max_retries=2)", flaky.callCount)
 	}
 }

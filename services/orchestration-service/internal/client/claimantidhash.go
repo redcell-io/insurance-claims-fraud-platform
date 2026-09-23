@@ -2,12 +2,14 @@ package client
 
 import (
 	"context"
+	"log/slog"
+	"time"
 
+	"claimfraud/pkg/telemetry"
 	claimantidhashv1 "claimfraud/proto/gen/go/claimantidhash/v1"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
 )
 
 // ClaimantIDHashClient calls the (Java, Spring Boot) Claimant ID Hashing
@@ -17,11 +19,15 @@ type ClaimantIDHashClient struct {
 	rpc  claimantidhashv1.ClaimantIdHashingServiceClient
 }
 
-func DialClaimantIDHash(addr string) (*ClaimantIDHashClient, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+func DialClaimantIDHash(addr string, logger *slog.Logger) (*ClaimantIDHashClient, error) {
+	conn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(telemetry.UnaryClientInterceptor(logger)),
+	)
 	if err != nil {
 		return nil, err
 	}
+	telemetry.WarmUp(conn, logger, addr, 5*time.Second)
 	return &ClaimantIDHashClient{conn: conn, rpc: claimantidhashv1.NewClaimantIdHashingServiceClient(conn)}, nil
 }
 
@@ -30,7 +36,6 @@ func (c *ClaimantIDHashClient) Close() error {
 }
 
 func (c *ClaimantIDHashClient) Hash(ctx context.Context, correlationID, claimantName string) (*claimantidhashv1.HashClaimantIdResponse, error) {
-	ctx = metadata.AppendToOutgoingContext(ctx, "x-correlation-id", correlationID)
 	return c.rpc.HashClaimantId(ctx, &claimantidhashv1.HashClaimantIdRequest{
 		CorrelationId: correlationID,
 		ClaimantName:  claimantName,

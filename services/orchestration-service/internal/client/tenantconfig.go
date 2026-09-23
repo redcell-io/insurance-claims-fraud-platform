@@ -4,7 +4,10 @@ package client
 
 import (
 	"context"
+	"log/slog"
+	"time"
 
+	"claimfraud/pkg/telemetry"
 	tenantconfigv1 "claimfraud/proto/gen/go/tenantconfig/v1"
 
 	"google.golang.org/grpc"
@@ -18,11 +21,15 @@ type TenantConfigClient struct {
 	rpc  tenantconfigv1.TenantConfigServiceClient
 }
 
-func DialTenantConfig(addr string) (*TenantConfigClient, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+func DialTenantConfig(addr string, logger *slog.Logger) (*TenantConfigClient, error) {
+	conn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(telemetry.UnaryClientInterceptor(logger)),
+	)
 	if err != nil {
 		return nil, err
 	}
+	telemetry.WarmUp(conn, logger, addr, 5*time.Second)
 	return &TenantConfigClient{conn: conn, rpc: tenantconfigv1.NewTenantConfigServiceClient(conn)}, nil
 }
 

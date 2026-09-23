@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
 )
@@ -61,6 +62,14 @@ func NewPublisher(brokerAddr string) *KafkaPublisher {
 			Balancer:               &kafkago.Hash{},
 			RequiredAcks:           kafkago.RequireOne,
 			AllowAutoTopicCreation: true, // thin slice: no separate topic-provisioning step yet
+			// kafka-go's Writer defaults BatchTimeout to 1s — fine when
+			// nothing times out a Publish call, but the DAG's publish node
+			// now enforces its own timeout_ms (DECISIONS.md #17) well under
+			// that, so every single-message publish would hit the node
+			// timeout before the default batch window ever flushed it.
+			// Publish() sends one claim at a time, not a real producer
+			// batch, so flush near-immediately instead.
+			BatchTimeout: 10 * time.Millisecond,
 		},
 	}
 }

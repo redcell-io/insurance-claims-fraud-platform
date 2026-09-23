@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 
+	"claimfraud/pkg/telemetry"
 	"claimfraud/services/claims-gateway/internal/client"
 	"claimfraud/services/claims-gateway/internal/handler"
 )
@@ -20,25 +21,27 @@ func main() {
 	orchestrationAddr := getenv("ORCHESTRATION_ADDR", "localhost:9091")
 	tenantConfigAddr := getenv("TENANT_CONFIG_ADDR", "localhost:9094")
 
-	tenantConfig, err := client.DialTenantConfig(tenantConfigAddr)
+	logger := telemetry.NewLogger("claims-gateway")
+
+	tenantConfig, err := client.DialTenantConfig(tenantConfigAddr, logger)
 	if err != nil {
 		log.Fatalf("dial tenant-config-svc at %s: %v", tenantConfigAddr, err)
 	}
 	defer tenantConfig.Close()
 
-	orchestration, err := client.DialOrchestration(orchestrationAddr)
+	orchestration, err := client.DialOrchestration(orchestrationAddr, logger)
 	if err != nil {
 		log.Fatalf("dial orchestration service at %s: %v", orchestrationAddr, err)
 	}
 	defer orchestration.Close()
 
-	h := &handler.ClaimsHandler{TenantConfig: tenantConfig, Orchestration: orchestration}
+	h := &handler.ClaimsHandler{TenantConfig: tenantConfig, Orchestration: orchestration, Logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/claims", h.SubmitClaim)
 	mux.HandleFunc("/healthz", handler.Healthz)
 
-	log.Printf("claims-gateway listening on %s, forwarding to orchestration at %s (tenant-config at %s)", httpAddr, orchestrationAddr, tenantConfigAddr)
+	logger.Info("claims-gateway starting", "http_addr", httpAddr, "orchestration_addr", orchestrationAddr, "tenant_config_addr", tenantConfigAddr)
 	if err := http.ListenAndServe(httpAddr, mux); err != nil {
 		log.Fatalf("claims-gateway server failed: %v", err)
 	}

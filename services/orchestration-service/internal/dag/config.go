@@ -23,7 +23,8 @@ type Node struct {
 	Service    string   `yaml:"service"`
 	Group      string   `yaml:"group"`
 	TimeoutMs  int32    `yaml:"timeout_ms"`
-	OnFailure  string   `yaml:"on_failure"` // fail_fast | skip | degrade, default fail_fast
+	MaxRetries int32    `yaml:"max_retries"` // default 0 = no retry
+	OnFailure  string   `yaml:"on_failure"`  // fail_fast | skip | degrade, default fail_fast
 	DependsOn  []string `yaml:"depends_on"`
 	EnabledFor []string `yaml:"enabled_for"` // empty = enabled for all tenants
 }

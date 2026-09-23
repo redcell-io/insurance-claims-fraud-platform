@@ -3,12 +3,14 @@ package client
 
 import (
 	"context"
+	"log/slog"
+	"time"
 
+	"claimfraud/pkg/telemetry"
 	orchestrationv1 "claimfraud/proto/gen/go/orchestration/v1"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
 )
 
 // OrchestrationClient wraps the generated gRPC client for the
@@ -21,12 +23,20 @@ type OrchestrationClient struct {
 }
 
 // DialOrchestration connects to the Orchestration Service at addr
-// (host:port).
-func DialOrchestration(addr string) (*OrchestrationClient, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+// (host:port). Every call made through the returned client carries
+// tenant_id/correlation_id as gRPC metadata automatically, via
+// telemetry.UnaryClientInterceptor reading them off the call's context
+// (see telemetry.WithTenantID/WithCorrelationID) — never the message
+// payload, per DESIGN.md §8.
+func DialOrchestration(addr string, logger *slog.Logger) (*OrchestrationClient, error) {
+	conn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(telemetry.UnaryClientInterceptor(logger)),
+	)
 	if err != nil {
 		return nil, err
 	}
+	telemetry.WarmUp(conn, logger, addr, 5*time.Second)
 	return &OrchestrationClient{
 		conn: conn,
 		rpc:  orchestrationv1.NewOrchestrationServiceClient(conn),
@@ -37,19 +47,12 @@ func (c *OrchestrationClient) Close() error {
 	return c.conn.Close()
 }
 
-// ProcessClaim calls the Orchestration Service, injecting tenantID and
-// correlationID as gRPC metadata rather than the message payload — every
-// downstream service reads tenant context via interceptor, per
-// DESIGN.md §8.
+// ProcessClaim calls the Orchestration Service. ctx must carry
+// tenant_id/correlation_id (see DialOrchestration) for them to reach the
+// server as metadata.
 func (c *OrchestrationClient) ProcessClaim(
 	ctx context.Context,
-	tenantID, correlationID string,
 	req *orchestrationv1.ProcessClaimRequest,
 ) (*orchestrationv1.ProcessClaimResponse, error) {
-	md := metadata.Pairs(
-		"x-tenant-id", tenantID,
-		"x-correlation-id", correlationID,
-	)
-	ctx = metadata.NewOutgoingContext(ctx, md)
 	return c.rpc.ProcessClaim(ctx, req)
 }
