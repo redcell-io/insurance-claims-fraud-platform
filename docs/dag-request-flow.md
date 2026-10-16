@@ -53,6 +53,12 @@ sequenceDiagram
 them sequentially within that stage; see `executor.go`'s doc comment and
 DECISIONS.md #10 for why that's a deliberate, not-yet-needed simplification.)
 
+(Every `Orch->>X` call above is now wrapped in `callWithResilience`: a
+per-attempt `context.WithTimeout` — `node.timeout_ms`, falling back to the
+DAG's `timeout_ms`, falling back to a 500ms default — plus up to
+`node.max_retries` retries on any error with a fixed 20ms backoff, all
+*before* the `on_failure` policy is consulted. See DECISIONS.md #17.)
+
 ## File-by-file
 
 | Step | What happens | File |
@@ -76,6 +82,15 @@ DECISIONS.md #10 for why that's a deliberate, not-yet-needed simplification.)
 
 ## Notes
 
+- Every downstream call (steps 11a-13) goes through `callWithResilience`
+  in `executor.go`, not a bare client call — per-attempt timeout, then
+  fixed-backoff retries up to `max_retries`, then `on_failure`
+  (fail_fast/skip/degrade) as the last line of defense. `tenant_id` and
+  `correlation_id` are also carried on `ctx` via `pkg/telemetry` for the
+  whole run, feeding structured JSON logs (Go `log/slog`, Java
+  SLF4J+MDC via `logback-spring.xml`) and the gRPC interceptors on both
+  the ClaimsGateway→Orchestration and Orchestration→{enrichment,model}
+  hops — see DECISIONS.md #17.
 - Steps 3-4 and 6-13 are two separate gRPC hops (ClaimsGateway→Orchestration,
   Orchestration→{tenant-config-svc,claimant-id-hash,address-norm,policy-lookup,model})
   — Orchestration is the only service that talks to tenant-config-svc *and*
@@ -90,8 +105,11 @@ DECISIONS.md #10 for why that's a deliberate, not-yet-needed simplification.)
   (none `depends_on` another) — declared as concurrent in the DAG's own
   model, but the current executor runs them sequentially in file order; see
   `executor.go`'s doc comment.
-- This trace is current as of the real-Kafka-publish pass; `DECISIONS.md`
-  explains why the DAG loading here is un-cached, un-validated, and
-  staged rather than topologically sorted, why claimant hashing/policy
-  lookup are thin slices (#12, #13), and why the Kafka publish is JSON to
-  a Redpanda broker rather than Protobuf + schema registry (#15).
+- This trace is current as of the observability/resilience pass
+  (`DECISIONS.md` #17); it also explains why the DAG loading here is
+  un-cached, un-validated, and staged rather than topologically sorted,
+  why claimant hashing/policy lookup are thin slices (#12, #13), why the
+  Kafka publish is JSON to a Redpanda broker rather than Protobuf +
+  schema registry (#15), and why this pass's resilience is
+  timeout+retry only — no circuit breakers, tracing, or metrics yet
+  (#17).

@@ -29,7 +29,37 @@ console-driven path.
    Connect *before* submitting a claim — the panel's consumer starts from
    the topic's latest offset, so a message produced before you click
    Connect won't show up. Full walkthrough: TC-10 below.
-2. The console, backend on a **non-default port** (its default `:8080`
+2. Optional but recommended: the console's **Logs panel**, one tab per
+   service, each tab's path pointed at the file `scripts/start-all.sh`
+   writes for that service. The console backend resolves a relative path
+   against its own `backend/` cwd, not this repo, so give it the
+   **absolute** path:
+
+   | Service | Log path |
+   |---|---|
+   | claims-gateway | `<repo>\logs\claims-gateway.log` |
+   | orchestration-service | `<repo>\logs\orchestration-service.log` |
+   | tenant-config-svc | `<repo>\logs\tenant-config-svc.log` |
+   | model-service | `<repo>\logs\model-service.log` |
+   | claimant-id-hashing-svc | `<repo>\logs\claimant-id-hashing-svc.log` |
+   | address-normalization-svc | `<repo>\logs\address-normalization-svc.log` |
+   | policy-lookup-svc | `<repo>\logs\policy-lookup-svc.log` |
+
+   `<repo>` = this repo's absolute path, e.g.
+   `C:\Users\mtand\OneDrive\Documents\redcell-io\portfolio\projects\sample\java\claim-fraud-platform`.
+   Run `scripts/start-all.sh` (or otherwise start all 7 services) *before*
+   adding tabs — the console's `POST /api/v1/logs/:panelID/start` 400s
+   immediately on a path that doesn't exist yet (see that repo's own
+   `skills/logsource.md`), it doesn't wait around for the file to appear.
+   Each tab tails independently via its own WebSocket — switching tabs
+   never stops a running one — so it's fine to leave all 7 open for a
+   whole session. For watching one request's path through the DAG,
+   `orchestration-service.log` is the most useful single tab: it logs the
+   Kafka publish and every `on_failure` outcome on every request.
+   ClaimsGateway's own log, by contrast, only writes a line on its error
+   branches — a tab showing nothing for a successful request is expected,
+   not a sign the tail is broken.
+3. The console, backend on a **non-default port** (its default `:8080`
    collides with ClaimsGateway):
    ```sh
    cd backend && PORT=8090 go run ./cmd/server               # terminal A
@@ -38,7 +68,7 @@ console-driven path.
    `BACKEND_PORT` matters for the frontend too, not just the backend —
    its dev-proxy hardcodes `8080` otherwise and the browser UI silently
    fails (see the 2026-09-11 run note near the bottom of this file).
-3. `jq` on `PATH` if driving the raw APIs from a shell instead of the UI
+4. `jq` on `PATH` if driving the raw APIs from a shell instead of the UI
    (every request/response below is written as a raw `curl` call so it can
    be pasted directly — the console's frontend panels do the same thing
    with less typing, once its proto is uploaded).
