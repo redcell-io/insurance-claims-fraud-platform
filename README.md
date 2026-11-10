@@ -23,11 +23,16 @@ replacing the log-only stub — see [DECISIONS.md](DECISIONS.md) #15 for why
 JSON rather than Protobuf + schema registry. Model Service now returns a
 **real, deterministic, feature-driven score** (not a hardcoded value) via
 a hand-weighted formula, not ONNX/ML yet — see
-[DECISIONS.md](DECISIONS.md) #16. See [DECISIONS.md](DECISIONS.md)
-for what's still deferred (resilience/observability, batch flow, real
-ONNX/ML inference, and layer 2's own remaining scope: Postgres,
-transactional outbox, Kafka cache invalidation, JSON Schema validation,
-API-key auth).
+[DECISIONS.md](DECISIONS.md) #16. Structured JSON logging plus DAG-node
+timeout/retry enforcement landed next (resilience/observability, thin
+slice — [DECISIONS.md](DECISIONS.md) #17), followed by **Prometheus RED
+metrics** — every service exposes `/metrics`, scraped by a new
+`prometheus` container — see [DECISIONS.md](DECISIONS.md) #18.
+OpenTelemetry tracing/Jaeger and Grafana dashboards are still deferred.
+See [DECISIONS.md](DECISIONS.md) for the rest of what's still deferred
+(batch flow, real ONNX/ML inference, and layer 2's own remaining scope:
+Postgres, transactional outbox, Kafka cache invalidation, JSON Schema
+validation, API-key auth).
 
 ## Repo layout
 
@@ -40,7 +45,9 @@ claim-fraud-platform/
 ├── proto/                           # shared .proto contracts (single source of truth)
 ├── config/                          # tenant + DAG config YAML (shared, not nested in a service)
 │   ├── tenants.yaml
+│   ├── prometheus.yml               # scrape config for the prometheus container
 │   └── dag/{tenant_id}/{product}/{event_type}.yaml
+├── pkg/telemetry/                   # shared Go logging + gRPC interceptors + Prometheus metrics
 ├── services/
 │   ├── claims-gateway/              # Go — REST ingress, REST→gRPC bridge
 │   ├── orchestration-service/       # Go — executes the config-driven enrichment DAG

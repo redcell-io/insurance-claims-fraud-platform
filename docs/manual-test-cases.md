@@ -18,8 +18,9 @@ console-driven path.
 
 1. All 7 claim-fraud-platform processes running — [RUNBOOK.md](../RUNBOOK.md)
    step 4b — **plus the Kafka broker from step 4a** (`docker compose up
-   -d`) if you're running TC-10. Kafka connection details, for the
-   console's Kafka panel (Brokers / Topics fields):
+   -d`) if you're running TC-10, or **the `prometheus` container**, same
+   `docker compose up -d`, if you're running TC-12. Kafka connection
+   details, for the console's Kafka panel (Brokers / Topics fields):
    | Field | Value |
    |---|---|
    | Brokers | `localhost:19092` |
@@ -750,6 +751,62 @@ service that goes down and comes back **after** orchestration-service's
 own client already connected still takes a few seconds to recover (gRPC
 client reconnect backoff, not something `WarmUp` — a one-time,
 dial-time-only check — addresses); expected, not a bug.
+
+---
+
+## TC-12 — every service's `/metrics` endpoint is live and scraped
+
+New as of the Prometheus metrics pass (DECISIONS.md #18): proves
+`RecordRequest` (called from both `UnaryServerInterceptor` and
+`UnaryClientInterceptor`, same two functions TC-11's resilience work
+runs through) actually produces `grpc_requests_total`/
+`grpc_request_duration_seconds` samples per service, and that the new
+`prometheus` container can reach all 7 of them. Not console-driven (no
+proto to parse, just plain HTTP GETs) — curl only.
+
+**Protocol**: HTTP (Prometheus exposition format, not JSON)
+
+**Endpoint**: `GET /metrics` — same mux as `/healthz` on claims-gateway;
+its own dedicated listener on every other service (DECISIONS.md #18)
+
+**Port**: gRPC port **+100** for every service except claims-gateway
+(same port as REST, `:8080`):
+
+| Service | `/metrics` port |
+|---|---|
+| claims-gateway | `8080` |
+| orchestration-service | `9191` |
+| address-normalization-svc | `9192` |
+| model-service | `9193` |
+| tenant-config-svc | `9194` |
+| claimant-id-hashing-svc | `9195` |
+| policy-lookup-svc | `9196` |
+
+**Payload**: none (`GET`, no body).
+
+**Steps**:
+1. With the full stack up (RUNBOOK.md step 4b) and the `prometheus`
+   container up (step 4a), submit at least one claim (TC-01's payload)
+   so there's a non-zero sample to look for.
+2. `curl -s http://localhost:<port>/metrics` against each service in the
+   table above; grep for `grpc_requests_total` and
+   `grpc_request_duration_seconds`.
+3. Open `http://localhost:9090/targets` and confirm all 7 jobs (named in
+   `config/prometheus.yml`) show `UP`.
+
+**Expected response**: each curl returns Prometheus exposition text
+(`# HELP`/`# TYPE` lines plus samples) containing both metric families,
+labeled `method`/`tenant_id`/`status` (counter) or `method`/`tenant_id`
+(histogram) — e.g.
+`grpc_requests_total{method="/orchestration.v1.OrchestrationService/ProcessClaim",status="ok",tenant_id="acme_insurance"} 1`.
+All 7 Prometheus targets show `UP`, not `DOWN`.
+
+**Last verified**: not yet run live — this pass's metrics code
+(`pkg/telemetry/metrics.go`, the 3 Java `MetricsServerLifecycle`
+classes, `config/prometheus.yml`, `docker-compose.yml`'s `prometheus`
+service) is written and documented (DECISIONS.md #18) but still
+uncommitted and hasn't been exercised against a running stack yet —
+don't treat this as confirmed until it has.
 
 ---
 

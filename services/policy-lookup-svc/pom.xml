@@ -75,6 +75,14 @@
       <version>7.4</version>
     </dependency>
 
+    <!-- Prometheus RED metrics (DECISIONS.md #18) — version managed by
+         spring-boot-starter-parent's BOM, unlike grpc/protobuf above
+         which this repo pins explicitly since those aren't Spring-managed. -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+    </dependency>
+
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>

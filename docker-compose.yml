@@ -37,4 +37,20 @@ services:
       - "19092:9092"
     restart: unless-stopped
 
+  # Scrapes all 7 services' /metrics endpoints (DECISIONS.md #18). The
+  # services run directly on the host, not as containers, so
+  # config/prometheus.yml targets host.docker.internal — Docker Desktop
+  # (Windows/Mac) resolves that out of the box; on Linux it needs
+  # `extra_hosts: ["host.docker.internal:host-gateway"]` added here,
+  # left out since this repo's dev environment is Windows (see
+  # java25-toolchain/go-toolchain memory notes).
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: claimfraud-prometheus
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
 #   - postgres (once Tenant Config Service's real store lands)

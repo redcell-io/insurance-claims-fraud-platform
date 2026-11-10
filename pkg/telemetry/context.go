@@ -1,7 +1,8 @@
-// Package telemetry provides the shared structured-logging and
-// correlation-ID/tenant-ID propagation used by every Go service in this
-// repo (DESIGN.md §11 — the thin-slice version: structured logging and
-// gRPC interceptors, no tracing/metrics backend yet).
+// Package telemetry provides the shared structured-logging,
+// correlation-ID/tenant-ID propagation, and Prometheus RED metrics
+// (DECISIONS.md #18) used by every Go service in this repo (DESIGN.md
+// §11 — the thin-slice version: logging, metrics, and gRPC interceptors;
+// no tracing backend yet).
 package telemetry
 
 import "context"

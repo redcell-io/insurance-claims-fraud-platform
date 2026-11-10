@@ -18,8 +18,8 @@ expected-result), see [docs/manual-test-cases.md](docs/manual-test-cases.md).
   auto-toolchained. `go build`/`go run` mask an older local SDK via
   `GOTOOLCHAIN=auto`, but `gopls` doesn't (see Troubleshooting below).
 - Java 25 (Temurin) + Maven 3.9+
-- Docker (for the Kafka broker via `docker-compose.yml` — see step 4a.
-  Postgres isn't wired in yet.)
+- Docker (for the Kafka broker and the Prometheus container, both via
+  `docker-compose.yml` — see step 4a. Postgres isn't wired in yet.)
 
 ## 1. Regenerate protobuf stubs
 
@@ -78,7 +78,7 @@ cd ../policy-lookup-svc && mvn test
 
 ## 4. Run the full stack
 
-### 4a. Kafka broker (Redpanda, via docker-compose)
+### 4a. Kafka broker + Prometheus (via docker-compose)
 
 Start this **before** Orchestration, or its publish calls just fail-soft
 (`on_failure: skip` on the `publish` node — see DECISIONS.md #15):
@@ -87,11 +87,25 @@ Start this **before** Orchestration, or its publish calls just fail-soft
 docker compose up -d
 ```
 
-Broker listens on **`localhost:19092`** — deliberately not the
-conventional `9092`, which address-normalization-svc's own gRPC server
-already owns in this repo (`9091`-`9096` below are all gRPC; `19092` is
-the one Kafka port in the mix). `docker compose down` to stop it; no
-volumes, so topic data doesn't persist across a `down`.
+This starts two containers:
+
+- **Redpanda broker**, listening on **`localhost:19092`** — deliberately
+  not the conventional `9092`, which address-normalization-svc's own
+  gRPC server already owns in this repo (`9091`-`9196` below are all
+  gRPC/metrics; `19092` is the one Kafka port in the mix).
+- **Prometheus** (`claimfraud-prometheus`, DECISIONS.md #18), UI/API on
+  **`localhost:9090`**, scraping all 7 services' `/metrics` endpoints
+  every 15s per `config/prometheus.yml`. It targets
+  `host.docker.internal:<port>` since the services run directly on the
+  host, not as containers — Docker Desktop (Windows/Mac) resolves that
+  automatically; on Linux add `extra_hosts:
+  ["host.docker.internal:host-gateway"]` to the `prometheus` service in
+  `docker-compose.yml` first. The services don't need to be up yet for
+  Prometheus itself to start, but their targets show as `down` on
+  `http://localhost:9090/targets` until they are (see step 5).
+
+`docker compose down` to stop both; no volumes on either, so topic data
+and any scraped Prometheus history don't persist across a `down`.
 
 ### 4b. The seven services
 
@@ -122,27 +136,32 @@ lazily, so a couple seconds' head start is enough, it doesn't have to be
 exact):
 
 ```sh
-# 1. Tenant Config Service (Go) — gRPC :9094
+# 1. Tenant Config Service (Go) — gRPC :9094, metrics :9194
 cd services/tenant-config-svc && go run ./cmd/tenantconfig
 
-# 2. Model Service (Go, rules-based scoring — not ML) — gRPC :9093
+# 2. Model Service (Go, rules-based scoring — not ML) — gRPC :9093, metrics :9193
 cd services/model-service && go run ./cmd/model
 
-# 3. Claimant ID Hashing (Java 25 / Spring Boot) — gRPC :9095
+# 3. Claimant ID Hashing (Java 25 / Spring Boot) — gRPC :9095, metrics :9195
 cd services/claimant-id-hashing-svc && mvn spring-boot:run
 
-# 4. Address Normalization (Java 25 / Spring Boot) — gRPC :9092
+# 4. Address Normalization (Java 25 / Spring Boot) — gRPC :9092, metrics :9192
 cd services/address-normalization-svc && mvn spring-boot:run
 
-# 5. Policy Lookup (Java 25 / Spring Boot) — gRPC :9096
+# 5. Policy Lookup (Java 25 / Spring Boot) — gRPC :9096, metrics :9196
 cd services/policy-lookup-svc && mvn spring-boot:run
 
-# 6. Orchestration Service (Go) — gRPC :9091, calls #1-#5 + the Kafka broker
+# 6. Orchestration Service (Go) — gRPC :9091, metrics :9191, calls #1-#5 + the Kafka broker
 cd services/orchestration-service && go run ./cmd/orchestration
 
-# 7. ClaimsGateway (Go) — REST :8080, calls #1 and #6
+# 7. ClaimsGateway (Go) — REST :8080 (also serves /metrics on the same port), calls #1 and #6
 cd services/claims-gateway && go run ./cmd/gateway
 ```
+
+Every service's `/metrics` port is its gRPC port **+100** (claims-gateway
+is the one exception — it has no separate metrics port, since `/metrics`
+rides on its existing REST `:8080` mux). DECISIONS.md #18 has the full
+rationale; see step 5 below for how to check them.
 
 Ports and downstream addresses are configurable via env vars
 (`TENANT_CONFIG_ADDR`/`TENANT_CONFIG_GRPC_ADDR`, `MODEL_GRPC_ADDR`,
@@ -150,8 +169,9 @@ Ports and downstream addresses are configurable via env vars
 `CLAIMANT_ID_HASHING_ADDR`/`app.grpc.port`,
 `POLICY_LOOKUP_ADDR`/`app.grpc.port`, `KAFKA_BROKER_ADDR` (default
 `localhost:19092`), `ORCHESTRATION_GRPC_ADDR`/`ORCHESTRATION_ADDR`,
-`GATEWAY_HTTP_ADDR`, `DAG_CONFIG_DIR`, `TENANTS_FILE`) — see each
-service's `main.go`/`application.yml` for defaults.
+`GATEWAY_HTTP_ADDR`, `DAG_CONFIG_DIR`, `TENANTS_FILE`,
+`*_METRICS_ADDR` per Go service / `app.metrics.port` per Java service) —
+see each service's `main.go`/`application.yml` for defaults.
 
 ## 5. Smoke test
 
@@ -213,6 +233,27 @@ inside its own container) or via the test console's Kafka panel
 
 `GET http://localhost:8080/healthz` is also available on the gateway.
 
+### Checking metrics (DECISIONS.md #18)
+
+Each service exposes `/metrics` in Prometheus exposition format on its
+gRPC-port-+100 (claims-gateway: same port as REST, `:8080`) — e.g.:
+
+```sh
+curl -s http://localhost:9191/metrics | grep grpc_requests_total   # orchestration-service
+```
+
+After a claim or two have gone through, this shows per-method/tenant/status
+counters, e.g. `grpc_requests_total{method="/orchestration.v1.OrchestrationService/ProcessClaim",status="ok",tenant_id="acme_insurance"} 1`.
+`grpc_request_duration_seconds` (a histogram, same labels minus `status`)
+is also present.
+
+With the `prometheus` container up (step 4a), `http://localhost:9090/targets`
+should show all 7 jobs as `UP` once the services are listening — if one
+shows `DOWN`, the service either isn't running yet or its metrics port
+differs from `config/prometheus.yml`'s (check the env var/`app.metrics.port`
+override). `http://localhost:9090/graph` lets you run a PromQL query
+directly, e.g. `rate(grpc_requests_total[1m])`.
+
 ClaimsGateway currently always resolves the same hardcoded tenant id
 (`acme_insurance` — real API-key-based resolution is deferred, see
 [DECISIONS.md](DECISIONS.md) #9), but does so via a real gRPC call to
@@ -239,7 +280,8 @@ stopped), or kill them directly:
 powershell.exe -NoProfile -Command "Get-NetTCPConnection -LocalPort 9091,9092,9093,9094,9095,9096,8080 -State Listen | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force }"
 ```
 
-Either way, finish with `docker compose down` for the broker from step 4a.
+Either way, finish with `docker compose down` for the broker and
+Prometheus container from step 4a.
 Nothing here restarts itself or holds external state beyond the broker's
 own topic data (no DB writes), so there's no other cleanup step — just
 don't leave stray `go run`/`mvn spring-boot:run` processes (or the broker
@@ -285,6 +327,15 @@ container) running before switching branches or rebuilding.
   throwaway `kafka-go` consumer) connecting to `localhost:19092` from the
   host works correctly, since that's the address it's actually advertised
   for.
+
+- **Prometheus targets all show `DOWN` on `http://localhost:9090/targets`,
+  on Linux:** `config/prometheus.yml` points at `host.docker.internal`,
+  which Docker Desktop (Windows/Mac) resolves out of the box but plain
+  Docker Engine on Linux doesn't. Add `extra_hosts:
+  ["host.docker.internal:host-gateway"]` to the `prometheus` service in
+  `docker-compose.yml`, then `docker compose up -d` again. Not needed on
+  this repo's dev environment (Windows), so left out by default — see
+  DECISIONS.md #18.
 
 - **Redpanda broker container is up (`docker compose ps` shows it
   running) but Orchestration's publish calls fail-soft

@@ -8,3 +8,7 @@ spring:
 app:
   grpc:
     port: 9092
+  # /metrics port (DECISIONS.md #18) — grpc.port + 100, same offset used
+  # for every non-claims-gateway service so it's easy to remember.
+  metrics:
+    port: 9192

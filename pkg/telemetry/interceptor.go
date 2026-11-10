@@ -39,6 +39,8 @@ func UnaryServerInterceptor(logger *slog.Logger) grpc.UnaryServerInterceptor {
 		resp, err := handler(ctx, req)
 		duration := time.Since(start)
 
+		RecordRequest(info.FullMethod, TenantIDFrom(ctx), err == nil, duration)
+
 		l := FromContext(ctx, logger).With(
 			"method", info.FullMethod,
 			"duration_ms", duration.Milliseconds(),
@@ -76,6 +78,8 @@ func UnaryClientInterceptor(logger *slog.Logger) grpc.UnaryClientInterceptor {
 		start := time.Now()
 		err := invoker(ctx, method, req, reply, cc, opts...)
 		duration := time.Since(start)
+
+		RecordRequest(method, TenantIDFrom(ctx), err == nil, duration)
 
 		l := FromContext(ctx, logger).With(
 			"method", method,

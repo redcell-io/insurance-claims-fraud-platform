@@ -40,6 +40,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/claims", h.SubmitClaim)
 	mux.HandleFunc("/healthz", handler.Healthz)
+	mux.Handle("/metrics", telemetry.MetricsHandler())
 
 	logger.Info("claims-gateway starting", "http_addr", httpAddr, "orchestration_addr", orchestrationAddr, "tenant_config_addr", tenantConfigAddr)
 	if err := http.ListenAndServe(httpAddr, mux); err != nil {

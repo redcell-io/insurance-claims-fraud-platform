@@ -382,3 +382,83 @@ hypothetical:**
    call, not a real producer batch, so there's no reason to hold it
    before flushing. Net effect: requests that used to take ~1-1.7s now
    complete in well under 100ms.
+
+## 18. Prometheus RED metrics (tracing still deferred)
+
+**Decision:** every service exposes a `/metrics` endpoint (Prometheus
+exposition format) and records two RED metrics — `grpc_requests_total{method,
+tenant_id, status}` and `grpc_request_duration_seconds{method, tenant_id}` —
+for every gRPC call it handles or makes, via `pkg/telemetry`'s
+`RecordRequest`, called from the existing `UnaryServerInterceptor`/
+`UnaryClientInterceptor` (same two functions #17 added — this is additive
+to code that already computes duration and knows method/error state, not
+a new instrumentation surface). A new `prometheus` container (`prom/prometheus`,
+`docker-compose.yml`) scrapes all 7 services' `/metrics` ports.
+
+Picked from a short list of candidate next phases (batch flow, real ONNX
+model, real tenant resolution, metrics+tracing) — this one continues
+directly from #17, which explicitly listed Prometheus metrics under "Not
+attempted this pass." Scoped to metrics only; OpenTelemetry tracing +
+Jaeger is a deliberate follow-up pass, not bundled in here — same
+"smaller, verifiable, one layer at a time" reasoning as every other
+thin-slice decision in this file, rather than one larger combined change
+touching every service's `main.go`/`pom.xml` twice as much before
+anything is testable.
+
+**No `service` label on the metrics.** Each service is scraped on its
+own dedicated port, and Prometheus's own scrape `job` label (set once in
+`config/prometheus.yml`) already distinguishes which service a sample
+came from — adding an explicit `service` label would duplicate that same
+information and, because `*slog.Logger` doesn't expose its own attached
+attributes, would have required threading a service name through all 11
+existing `UnaryServerInterceptor`/`UnaryClientInterceptor` call sites for
+no new information. `rate(grpc_requests_total{job="orchestration-service"}[1m])`
+queries identically to how a `service` label would. Revisit only if these
+metrics are ever federated/aggregated somewhere downstream that drops
+the `job` label.
+
+**Java services' `/metrics`: hand-rolled JDK `HttpServer`, not Spring
+Boot Actuator.** The three enrichment services are deliberately non-web
+today — gRPC only, manual `SmartLifecycle` (`GrpcServerLifecycle.java`'s
+own doc comment explains why: no `grpc-spring-boot-starter`, kept
+consistent by hand across all three rather than extracted into a shared
+starter). `spring-boot-starter-web` + Actuator would give
+`/actuator/prometheus` for near-zero code, plus free bonus endpoints
+(health, env, etc.), but pulls in an embedded Tomcat servlet container
+for exactly one route — more baseline heap, more threads, slower
+startup — multiplied across three JVMs that may end up co-located on one
+modest VM (the planned Hostinger deployment for the offline/batch flow,
+AWS later for real-time). It would also quietly undo the "non-web"
+design those services currently have on purpose. Chose
+`micrometer-registry-prometheus` (library only, Spring-BOM-managed
+version, unlike grpc/protobuf which this repo pins explicitly since
+those aren't Spring-managed) plus a new `MetricsServerLifecycle.java`
+sibling to `GrpcServerLifecycle.java`, same `SmartLifecycle` pattern,
+serving `/metrics` via `com.sun.net.httpserver.HttpServer` (JDK
+built-in, zero new dependency). More code than Actuator would need, but
+keeps the footprint minimal and the architecture consistent with what's
+already there; Actuator can still be added later if its extra endpoints
+turn out to be worth the cost once there's a concrete ops need for them.
+
+**This choice is about startup/footprint cost, not per-request latency —
+worth being precise about given this service's real-time SLA**
+(`DESIGN.md` §3: "sub-300ms for a fraud score at claim submission," the
+stated example target). `RecordRequest`'s actual work inside the request
+path — one counter increment, one histogram observation — is exactly
+what Prometheus client libraries are built to make safe on every
+request; that cost is the same regardless of which HTTP framework
+eventually serves `/metrics`. The `/metrics` endpoint itself runs on its
+own port and its own thread(s), fully decoupled from the gRPC server's
+request-handling threads, and is scraped by Prometheus roughly every
+15s in the background — it is never on the path of an actual claim-
+scoring request, Actuator or not. Where hand-rolled vs. Actuator
+actually differs is baseline memory/thread footprint, which only matters
+indirectly, via GC pressure under memory contention on a constrained
+VM — a possible source of occasional latency-tail spikes, not a direct
+hit to normal request latency. Don't conflate the two when revisiting
+this: the SLA argument supports the lighter option, but it isn't really
+an argument against Actuator on *request-latency* grounds specifically.
+
+**Not attempted this pass** (still open, same as #17 left them):
+OpenTelemetry tracing + Jaeger, Grafana dashboards, centralized log
+shipping, circuit breakers, mTLS.

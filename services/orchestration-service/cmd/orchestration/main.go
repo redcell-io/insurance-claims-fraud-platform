@@ -9,6 +9,7 @@ package main
 import (
 	"log"
 	"net"
+	"net/http"
 	"os"
 
 	"claimfraud/pkg/telemetry"
@@ -23,6 +24,7 @@ import (
 
 func main() {
 	grpcAddr := getenv("ORCHESTRATION_GRPC_ADDR", ":9091")
+	metricsAddr := getenv("ORCHESTRATION_METRICS_ADDR", ":9191")
 	addressNormAddr := getenv("ADDRESS_NORMALIZATION_ADDR", "localhost:9092")
 	modelAddr := getenv("MODEL_SERVICE_ADDR", "localhost:9093")
 	tenantConfigAddr := getenv("TENANT_CONFIG_ADDR", "localhost:9094")
@@ -90,8 +92,20 @@ func main() {
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(telemetry.UnaryServerInterceptor(logger)))
 	orchestrationv1.RegisterOrchestrationServiceServer(grpcServer, srv)
 
+	// No embedded web server here (gRPC only), so /metrics (DECISIONS.md
+	// #18) gets its own small listener, same as model-service/
+	// tenant-config-svc — only claims-gateway has an existing mux to
+	// mount it on.
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", telemetry.MetricsHandler())
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+			logger.Error("metrics server failed", "error", err)
+		}
+	}()
+
 	logger.Info("orchestration-service starting",
-		"grpc_addr", grpcAddr, "address_norm_addr", addressNormAddr, "claimant_id_hash_addr", claimantIDHashAddr,
+		"grpc_addr", grpcAddr, "metrics_addr", metricsAddr, "address_norm_addr", addressNormAddr, "claimant_id_hash_addr", claimantIDHashAddr,
 		"policy_lookup_addr", policyLookupAddr, "model_addr", modelAddr, "tenant_config_addr", tenantConfigAddr,
 		"kafka_broker_addr", kafkaBrokerAddr, "dag_config_dir", dagConfigDir)
 	if err := grpcServer.Serve(lis); err != nil {

@@ -9,6 +9,7 @@ package main
 import (
 	"log"
 	"net"
+	"net/http"
 	"os"
 
 	"claimfraud/pkg/telemetry"
@@ -21,6 +22,7 @@ import (
 
 func main() {
 	grpcAddr := getenv("TENANT_CONFIG_GRPC_ADDR", ":9094")
+	metricsAddr := getenv("TENANT_CONFIG_METRICS_ADDR", ":9194")
 	tenantsFile := getenv("TENANTS_FILE", "../../config/tenants.yaml")
 
 	logger := telemetry.NewLogger("tenant-config-svc")
@@ -38,7 +40,17 @@ func main() {
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(telemetry.UnaryServerInterceptor(logger)))
 	tenantconfigv1.RegisterTenantConfigServiceServer(grpcServer, &server.Server{Store: st, Logger: logger})
 
-	logger.Info("tenant-config-svc starting", "grpc_addr", grpcAddr, "tenants_file", tenantsFile)
+	// No embedded web server here (gRPC only) — /metrics (DECISIONS.md
+	// #18) gets its own small listener.
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", telemetry.MetricsHandler())
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+			logger.Error("metrics server failed", "error", err)
+		}
+	}()
+
+	logger.Info("tenant-config-svc starting", "grpc_addr", grpcAddr, "metrics_addr", metricsAddr, "tenants_file", tenantsFile)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("tenant-config-svc server failed: %v", err)
 	}

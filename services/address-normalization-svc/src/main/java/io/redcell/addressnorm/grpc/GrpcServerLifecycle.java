@@ -2,6 +2,7 @@ package io.redcell.addressnorm.grpc;
 
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -24,6 +25,7 @@ public class GrpcServerLifecycle implements SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(GrpcServerLifecycle.class);
 
     private final AddressNormalizationGrpcService addressNormalizationGrpcService;
+    private final MeterRegistry meterRegistry;
     private final int port;
 
     private Server server;
@@ -32,8 +34,10 @@ public class GrpcServerLifecycle implements SmartLifecycle {
 
     public GrpcServerLifecycle(
             AddressNormalizationGrpcService addressNormalizationGrpcService,
+            MeterRegistry meterRegistry,
             @Value("${app.grpc.port:9092}") int port) {
         this.addressNormalizationGrpcService = addressNormalizationGrpcService;
+        this.meterRegistry = meterRegistry;
         this.port = port;
     }
 
@@ -42,6 +46,7 @@ public class GrpcServerLifecycle implements SmartLifecycle {
         try {
             server = ServerBuilder.forPort(port)
                     .addService(addressNormalizationGrpcService)
+                    .intercept(new GrpcMetricsInterceptor(meterRegistry))
                     .build()
                     .start();
             running = true;

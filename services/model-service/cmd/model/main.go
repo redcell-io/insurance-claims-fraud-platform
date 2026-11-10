@@ -5,6 +5,7 @@ package main
 import (
 	"log"
 	"net"
+	"net/http"
 	"os"
 
 	"claimfraud/pkg/telemetry"
@@ -16,6 +17,7 @@ import (
 
 func main() {
 	grpcAddr := getenv("MODEL_GRPC_ADDR", ":9093")
+	metricsAddr := getenv("MODEL_METRICS_ADDR", ":9193")
 
 	logger := telemetry.NewLogger("model-service")
 
@@ -27,7 +29,17 @@ func main() {
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(telemetry.UnaryServerInterceptor(logger)))
 	modelv1.RegisterModelServiceServer(grpcServer, &server.Server{Logger: logger})
 
-	logger.Info("model-service starting", "grpc_addr", grpcAddr, "scoring_mode", "rules-based")
+	// No embedded web server here (gRPC only) — /metrics (DECISIONS.md
+	// #18) gets its own small listener.
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", telemetry.MetricsHandler())
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+			logger.Error("metrics server failed", "error", err)
+		}
+	}()
+
+	logger.Info("model-service starting", "grpc_addr", grpcAddr, "metrics_addr", metricsAddr, "scoring_mode", "rules-based")
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("model-service server failed: %v", err)
 	}

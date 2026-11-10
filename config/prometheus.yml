@@ -1,0 +1,41 @@
+# Scrape config for the `prometheus` container in docker-compose.yml
+# (DECISIONS.md #18). All 7 services run directly on the host (`go run` /
+# `mvn spring-boot:run`, see RUNBOOK.md), not as containers, so every
+# target uses host.docker.internal rather than a compose service name —
+# Docker Desktop (Windows/Mac) resolves that automatically; see
+# docker-compose.yml's prometheus service comment for the Linux caveat.
+#
+# `job_name` is each service's own name and is what distinguishes one
+# service's samples from another's — deliberately not duplicated as a
+# `service` label on the metrics themselves (see DECISIONS.md #18).
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: claims-gateway
+    static_configs:
+      - targets: ["host.docker.internal:8080"]
+
+  - job_name: orchestration-service
+    static_configs:
+      - targets: ["host.docker.internal:9191"]
+
+  - job_name: address-normalization-svc
+    static_configs:
+      - targets: ["host.docker.internal:9192"]
+
+  - job_name: model-service
+    static_configs:
+      - targets: ["host.docker.internal:9193"]
+
+  - job_name: tenant-config-svc
+    static_configs:
+      - targets: ["host.docker.internal:9194"]
+
+  - job_name: claimant-id-hashing-svc
+    static_configs:
+      - targets: ["host.docker.internal:9195"]
+
+  - job_name: policy-lookup-svc
+    static_configs:
+      - targets: ["host.docker.internal:9196"]
