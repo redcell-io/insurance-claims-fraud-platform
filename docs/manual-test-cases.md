@@ -761,8 +761,18 @@ New as of the Prometheus metrics pass (DECISIONS.md #18): proves
 `UnaryClientInterceptor`, same two functions TC-11's resilience work
 runs through) actually produces `grpc_requests_total`/
 `grpc_request_duration_seconds` samples per service, and that the new
-`prometheus` container can reach all 7 of them. Not console-driven (no
-proto to parse, just plain HTTP GETs) — curl only.
+`prometheus` container can reach all 7 of them.
+
+**Console-usable, same as every REST test case** (no proto to upload —
+there's no gRPC involved): the console's REST panel, method `GET`, no
+body, target `http://localhost:<port>/metrics` per the table below.
+Its `httpproxy` backend is a generic forwarder (`Method` defaults to
+`GET`, response body comes back as a raw string regardless of
+content-type), so Prometheus's plain-text exposition format round-trips
+through it exactly like TC-01's JSON does — it'll just render as plain
+text in the Response panel rather than pretty-printed JSON. Raw `curl`
+works identically and is what was actually used for the "Last verified"
+run below.
 
 **Protocol**: HTTP (Prometheus exposition format, not JSON)
 
@@ -801,12 +811,30 @@ labeled `method`/`tenant_id`/`status` (counter) or `method`/`tenant_id`
 `grpc_requests_total{method="/orchestration.v1.OrchestrationService/ProcessClaim",status="ok",tenant_id="acme_insurance"} 1`.
 All 7 Prometheus targets show `UP`, not `DOWN`.
 
-**Last verified**: not yet run live — this pass's metrics code
-(`pkg/telemetry/metrics.go`, the 3 Java `MetricsServerLifecycle`
-classes, `config/prometheus.yml`, `docker-compose.yml`'s `prometheus`
-service) is written and documented (DECISIONS.md #18) but still
-uncommitted and hasn't been exercised against a running stack yet —
-don't treat this as confirmed until it has.
+**Last verified**: 2026-11-14 — full stack + `docker compose up -d`
+(broker + `prometheus`) started fresh, 3 claims submitted via TC-01's
+payload (1 failed with `DeadlineExceeded` at `claimant_id_hash` —
+expected, not a bug: submitted ~5s after `start-all.sh`, before the
+Java/Maven services had finished starting, so orchestration-service's
+own dial-time `WarmUp` had already given up by the time they came up —
+same reconnect-timing caveat TC-11 already documents; the next 2 claims
+scored normally). ✅ `curl localhost:<port>/metrics` on all 7 services
+returned real `grpc_requests_total`/`grpc_request_duration_seconds_count`
+samples, correctly labeled by `method`/`tenant_id`/`status` (e.g.
+orchestration-service's `/metrics` showed every downstream method it
+calls, each with both `status="ok"` and `status="error"` series once
+the one failed claim's retries landed). ✅
+`http://localhost:9090/api/v1/targets` showed all 7 jobs
+(`claims-gateway`, `orchestration-service`, `address-normalization-svc`,
+`model-service`, `tenant-config-svc`, `claimant-id-hashing-svc`,
+`policy-lookup-svc`) as `"health":"up"`. ✅ A live PromQL query
+(`grpc_requests_total{job="policy-lookup-svc"}`) via
+`/api/v1/query` round-tripped correctly through Prometheus itself, not
+just the raw scrape — confirms the whole pipeline, not just that each
+service's endpoint responds. Scrape config, port scheme (gRPC port
++100, claims-gateway shares its REST port), and the no-`service`-label
+design (DECISIONS.md #18) all confirmed working as designed on the
+first live run — no fixes needed.
 
 ---
 
