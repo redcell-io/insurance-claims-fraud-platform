@@ -1,0 +1,36 @@
+# Scrape config for the fully-containerized stack (docker-compose.deploy.yml),
+# as opposed to config/prometheus.yml which targets host.docker.internal
+# for the host-native dev loop (RUNBOOK.md step 4b). Here every service
+# is itself a container on the same compose network, so targets use
+# compose service names instead.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: claims-gateway
+    static_configs:
+      - targets: ["claims-gateway:8080"]
+
+  - job_name: orchestration-service
+    static_configs:
+      - targets: ["orchestration-service:9191"]
+
+  - job_name: address-normalization-svc
+    static_configs:
+      - targets: ["address-normalization-svc:9192"]
+
+  - job_name: model-service
+    static_configs:
+      - targets: ["model-service:9193"]
+
+  - job_name: tenant-config-svc
+    static_configs:
+      - targets: ["tenant-config-svc:9194"]
+
+  - job_name: claimant-id-hashing-svc
+    static_configs:
+      - targets: ["claimant-id-hashing-svc:9195"]
+
+  - job_name: policy-lookup-svc
+    static_configs:
+      - targets: ["policy-lookup-svc:9196"]

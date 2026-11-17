@@ -1,0 +1,12 @@
+# Keeps the build context small — every service's Dockerfile COPYs only
+# specific subpaths it needs, but Docker still tars up everything under
+# this ignore list's exclusions before sending the context to the daemon.
+.git/
+frontend/
+logs/
+*.log
+tools/protoc/
+**/target/
+**/bin/
+.idea/
+.vscode/

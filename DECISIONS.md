@@ -462,3 +462,98 @@ an argument against Actuator on *request-latency* grounds specifically.
 **Not attempted this pass** (still open, same as #17 left them):
 OpenTelemetry tracing + Jaeger, Grafana dashboards, centralized log
 shipping, circuit breakers, mTLS.
+
+## 19. Containerized the full stack in a separate compose file, not by editing docker-compose.yml
+
+Picked off the open list ahead of a VM deployment (Hostinger), scoped to
+**demo-grade**: get all 7 services running as containers end-to-end, no
+TLS/domain/CI yet. Deferred this long on purpose — Postgres, ONNX model
+artifacts, batch flow, and OTel/Jaeger were all still open items that
+would each add new entries to any compose/Dockerfile work, so doing
+this once the service surface was momentarily stable (right after #18)
+was cheaper than doing it twice.
+
+**What shipped**: a `Dockerfile` per service (4 Go, multi-stage
+`golang:1.25` → `gcr.io/distroless/static-debian12`; 3 Java, multi-stage
+`eclipse-temurin:25-jdk` + hand-installed Maven 3.9.9 (from
+`archive.apache.org`, not `dlcdn.apache.org` — the latter only mirrors
+*current* releases, 404s on anything superseded) + a generated
+`toolchains.xml` registering the image's own JDK as "temurin 25" →
+`eclipse-temurin:25-jre`), a new `docker-compose.deploy.yml` wiring all
+7 plus the broker and Prometheus onto one bridge network via compose
+service-name DNS, and `config/prometheus.docker.yml` (service names
+instead of `host.docker.internal`).
+
+**Deliberately a separate compose file, not an edit to the existing
+`docker-compose.yml`**: that file's broker+Prometheus back the
+host-native dev loop (`scripts/start-all.sh`) that TC-01 through TC-12
+are all verified against — changing it in place would invalidate that
+verification history for no benefit. The two are mutually exclusive on
+host ports (8080, 9091-9096, 9191-9196, 19092, 9090) and must not run
+together.
+
+**Container-naming near-miss, worth flagging explicitly**: the first
+draft of `docker-compose.deploy.yml` reused `container_name:
+claimfraud-broker`/`claimfraud-prometheus` — identical to
+`docker-compose.yml`'s. Running `docker compose -f
+docker-compose.deploy.yml up` against those names silently *recreated*
+the existing dev-stack broker container under the new compose project,
+with different command args and a different port mapping, rather than
+erroring or creating an independent container. Caught immediately (the
+recreated broker had the wrong listener config), undone by tearing the
+deploy stack down and re-running `docker compose up -d` on the original
+file to restore it — no data was actually at risk (Redpanda here holds
+only ephemeral test traffic, not a persistent store), but it could have
+silently broken the dev stack for a session that didn't notice. Fixed
+by prefixing every container name in the deploy file with
+`claimfraud-deploy-`. **Lesson for any future compose file in this
+repo: never reuse a `container_name` across compose files unless the
+intent is explicitly to adopt that existing container** — compose
+treats a name collision as "manage this container," not as a conflict
+error, with no file-origin check.
+
+**Kafka broker needed two listeners, not one**: the dev broker
+advertises a single address (`localhost:19092`) because every client is
+host-side. In the deploy stack, `orchestration-service` (a container)
+and anything on the host both need to reach the broker, and Kafka
+clients reconnect using whatever address the broker hands back in its
+own metadata response — one advertised address can't serve both
+audiences. Fixed with Redpanda's multi-listener flags: `PLAINTEXT` on
+`9092` advertised as `broker:9092` (container-to-container), `OUTSIDE`
+on `19092` advertised as `localhost:19092` (host access), both declared
+in `--kafka-addr`/`--advertise-kafka-addr`.
+
+**`depends_on` without healthchecks reproduces the same WarmUp race
+TC-11/TC-12 already documented for host-native startup** — it only
+waits for "container started," not "gRPC server actually accepting
+connections," so a claim submitted immediately after `docker compose
+up` can still hit `DeadlineExceeded` while the JVM services are mid-boot
+(Spring Boot takes noticeably longer to become ready than the Go
+binaries). Not fixed here — same accepted caveat as the existing docs,
+just reproduced in the containerized path too. A real fix would be
+`healthcheck:`/`depends_on: condition: service_healthy` entries, left
+for when this moves past demo-grade.
+
+**Known gap, explicitly not solved this pass**: `proto/gen/go` is
+gitignored (regenerated locally via `proto/generate.sh`, never
+committed — see `monorepo-structure`/that script's own comment). Every
+Go service's `Dockerfile` depends on it already existing on disk before
+`docker build`/`docker compose build` runs. A fresh `git clone` on a
+Hostinger VM would **not** have it — building images on the VM directly
+from a clone will fail until this is addressed (commit the generated
+code, or install the protoc toolchain in the Go build stage, or build
+images locally and ship them to the VM instead of building there).
+Deliberately deferred to the actual VM-deployment step, not this one.
+
+**Verified working end-to-end** (local Docker Desktop, 2026-11-16):
+`docker compose -f docker-compose.deploy.yml up -d --build` built all 7
+images clean and started all 9 containers (7 services + broker +
+Prometheus). Once warmed up, `POST /v1/claims` against
+`claimfraud-deploy-claims-gateway:8080` returned the full happy-path
+result (`status:"scored"`, `fraud_score:0.05`, `model_version:"rules-v1"`,
+correctly normalized address) — matching TC-01 exactly, through
+container-to-container gRPC the whole way. The DAG's Kafka `publish`
+node also succeeded (`"published to kafka"`, topic `claims.realtime`)
+confirming the dual-listener broker config. All 7 Prometheus targets
+showed `"health":"up"` via their compose service-name addresses. Not
+yet deployed to an actual VM — that's the next step.

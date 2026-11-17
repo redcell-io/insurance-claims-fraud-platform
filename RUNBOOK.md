@@ -287,6 +287,32 @@ own topic data (no DB writes), so there's no other cleanup step — just
 don't leave stray `go run`/`mvn spring-boot:run` processes (or the broker
 container) running before switching branches or rebuilding.
 
+## 7. Running the full stack fully containerized (DECISIONS.md #19)
+
+An alternative to steps 4-6 above: `docker compose -f
+docker-compose.deploy.yml up -d --build` builds all 7 services as
+containers (each has its own `services/<name>/Dockerfile`) alongside
+the broker and Prometheus, wired together on one compose network.
+Useful for proving the stack is actually deployable (e.g. to a VM)
+rather than just runnable on this dev machine.
+
+**Mutually exclusive with steps 4-6** — both claim the same host ports
+(8080, 9091-9096, 9191-9196, 19092, 9090). Stop whichever is running
+(step 6 above, or `docker compose -f docker-compose.deploy.yml down`)
+before starting the other.
+
+**Before running it the first time**: `proto/gen/go` must already exist
+on disk (step 1) — it's gitignored, so a fresh clone won't have it, and
+the Go services' Dockerfiles will fail without it.
+
+Smoke test is the same `POST /v1/claims` as step 5, just against
+`localhost:8080` same as always — the container boundary doesn't change
+the client-facing address. Give the Java services a few extra seconds
+to finish their Spring Boot startup before the first request, same
+WarmUp caveat as TC-11/TC-12 (`DeadlineExceeded` on a too-early request
+isn't a bug, just the dial-time warm-up timeout losing the race with a
+slower-booting JVM container).
+
 ## Troubleshooting
 
 - **VS Code "Go to Definition" doesn't work / gopls errors like `go.work

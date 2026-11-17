@@ -1,0 +1,161 @@
+# Fully-containerized stack — all 7 claim-fraud-platform services plus
+# the Redpanda broker and Prometheus, each built from its own
+# services/<name>/Dockerfile. This is the "demo-grade deploy" compose
+# file (DECISIONS.md #19): a separate file from docker-compose.yml
+# (which still only runs the broker + Prometheus for the host-native dev
+# loop documented in RUNBOOK.md) so the already-verified dev workflow
+# (TC-01..TC-12) keeps working unchanged.
+#
+# Usage: docker compose -f docker-compose.deploy.yml up -d --build
+#
+# Mutually exclusive with the host-native dev loop (scripts/start-all.sh
+# + `docker compose up -d` for docker-compose.yml's broker/prometheus) —
+# both claim the same host ports (8080, 9091-9096, 9191-9196, 19092,
+# 9090). Kill the host-native services and `docker compose down` first
+# before bringing this up, and vice versa. Container names here are all
+# prefixed `claimfraud-deploy-`, distinct from docker-compose.yml's
+# `claimfraud-broker`/`claimfraud-prometheus`, specifically so this file
+# can never collide with and silently recreate those containers.
+#
+# Known gap: proto/gen/go is gitignored (regenerated via
+# proto/generate.sh, not committed — see that script's own comment and
+# each Go service's Dockerfile). It must already exist on disk before
+# `docker compose build` — a fresh `git clone` alone isn't enough yet.
+services:
+  broker:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: claimfraud-deploy-broker
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      # Two listeners: PLAINTEXT for other containers on this compose
+      # network (advertised as the service name), OUTSIDE for the host
+      # (advertised as localhost) — a single advertised address can't
+      # serve both, since Kafka clients reconnect using whatever address
+      # the broker hands back in its metadata response.
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr=PLAINTEXT://broker:9092,OUTSIDE://localhost:19092
+    ports:
+      - "19092:19092"
+    restart: unless-stopped
+    networks: [claimfraud]
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: claimfraud-deploy-prometheus
+    volumes:
+      - ./config/prometheus.docker.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks: [claimfraud]
+    depends_on:
+      - claims-gateway
+
+  tenant-config-svc:
+    build:
+      context: .
+      dockerfile: services/tenant-config-svc/Dockerfile
+    container_name: claimfraud-deploy-tenant-config-svc
+    environment:
+      TENANTS_FILE: /app/config/tenants.yaml
+    ports:
+      - "9094:9094"
+      - "9194:9194"
+    restart: unless-stopped
+    networks: [claimfraud]
+
+  model-service:
+    build:
+      context: .
+      dockerfile: services/model-service/Dockerfile
+    container_name: claimfraud-deploy-model-service
+    ports:
+      - "9093:9093"
+      - "9193:9193"
+    restart: unless-stopped
+    networks: [claimfraud]
+
+  claimant-id-hashing-svc:
+    build:
+      context: .
+      dockerfile: services/claimant-id-hashing-svc/Dockerfile
+    container_name: claimfraud-deploy-claimant-id-hashing-svc
+    ports:
+      - "9095:9095"
+      - "9195:9195"
+    restart: unless-stopped
+    networks: [claimfraud]
+
+  address-normalization-svc:
+    build:
+      context: .
+      dockerfile: services/address-normalization-svc/Dockerfile
+    container_name: claimfraud-deploy-address-normalization-svc
+    ports:
+      - "9092:9092"
+      - "9192:9192"
+    restart: unless-stopped
+    networks: [claimfraud]
+
+  policy-lookup-svc:
+    build:
+      context: .
+      dockerfile: services/policy-lookup-svc/Dockerfile
+    container_name: claimfraud-deploy-policy-lookup-svc
+    ports:
+      - "9096:9096"
+      - "9196:9196"
+    restart: unless-stopped
+    networks: [claimfraud]
+
+  orchestration-service:
+    build:
+      context: .
+      dockerfile: services/orchestration-service/Dockerfile
+    container_name: claimfraud-deploy-orchestration-service
+    environment:
+      ADDRESS_NORMALIZATION_ADDR: address-normalization-svc:9092
+      MODEL_SERVICE_ADDR: model-service:9093
+      TENANT_CONFIG_ADDR: tenant-config-svc:9094
+      CLAIMANT_ID_HASHING_ADDR: claimant-id-hashing-svc:9095
+      POLICY_LOOKUP_ADDR: policy-lookup-svc:9096
+      KAFKA_BROKER_ADDR: broker:9092
+      DAG_CONFIG_DIR: /app/config/dag
+    ports:
+      - "9091:9091"
+      - "9191:9191"
+    restart: unless-stopped
+    networks: [claimfraud]
+    depends_on:
+      - tenant-config-svc
+      - model-service
+      - claimant-id-hashing-svc
+      - address-normalization-svc
+      - policy-lookup-svc
+      - broker
+
+  claims-gateway:
+    build:
+      context: .
+      dockerfile: services/claims-gateway/Dockerfile
+    container_name: claimfraud-deploy-claims-gateway
+    environment:
+      ORCHESTRATION_ADDR: orchestration-service:9091
+      TENANT_CONFIG_ADDR: tenant-config-svc:9094
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks: [claimfraud]
+    depends_on:
+      - orchestration-service
+      - tenant-config-svc
+
+networks:
+  claimfraud:
+    name: claimfraud-deploy
