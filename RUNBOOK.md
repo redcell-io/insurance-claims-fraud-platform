@@ -313,6 +313,24 @@ WarmUp caveat as TC-11/TC-12 (`DeadlineExceeded` on a too-early request
 isn't a bug, just the dial-time warm-up timeout losing the race with a
 slower-booting JVM container).
 
+**A second, separate instance of this same symptom shows up after the
+stack has been left running idle for a while** (confirmed at ~20 hours;
+unconfirmed how short a gap triggers it) — the first `POST /v1/claims`
+after a long idle gap can fail with `DeadlineExceeded` the same way,
+even though every container has been `Up` and healthy the whole time.
+**Don't just retry — it isn't reliably self-healing.** Two retries in a
+row both failed the same way in testing; what actually cleared it was
+`docker compose -f docker-compose.deploy.yml restart`. Root cause looks
+like two compounding things, not purely a network reconnect: (1) the
+orchestration-service's gRPC channel to the idle downstream needs to
+re-establish, and (2) genuine JVM cold-start latency on the Java
+services' own side — one observed request took **101ms server-side** to
+process (`claimant-id-hashing-svc`'s own log, request-received to
+request-completed), ~2.5x the DAG's `claimant_id_hash` node timeout
+(`timeout_ms: 40`) with no network involved at that point. Not yet
+root-caused further or fixed; `docker compose ... restart` is the
+reliable workaround for now.
+
 ## Troubleshooting
 
 - **VS Code "Go to Definition" doesn't work / gopls errors like `go.work
