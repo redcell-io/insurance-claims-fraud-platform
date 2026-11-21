@@ -17,38 +17,49 @@
 # entry for the observability/resilience layer); a transient failure now
 # gets one retry, still bounded by the same timeout_ms per attempt,
 # before falling back to on_failure.
+#
+# v5: 40ms/80ms per-attempt budgets assumed the outbound gRPC channel is
+# already warm. It isn't always: grpc-go drops an idle client channel
+# back to IDLE, and the next call pays a fresh TCP/HTTP2 handshake —
+# observed exceeding 80ms (both attempts of a max_retries:1 node) on this
+# host's Docker networking, which fail_fast turned into claims-gateway
+# 502s. Raised enrichment + model_score budgets to 150ms/attempt so a
+# cold reconnect is survivable; claims-gateway's own orchestration-call
+# timeout is 5s, so there's ample headroom. Paired with keepalive on
+# orchestration-service's outbound clients (pkg one level up) so this
+# path is rarely exercised in the first place.
 tenant_id: acme_insurance
 product: auto
 event_type: claim.fnol
-version: 4
+version: 5
 timeout_ms: 250
 
 nodes:
   - id: claimant_id_hash
     service: claimant-id-hashing-svc
     group: enrichment
-    timeout_ms: 40
+    timeout_ms: 150
     max_retries: 1
     on_failure: fail_fast
 
   - id: address_normalize
     service: address-normalization-svc
     group: enrichment
-    timeout_ms: 40
+    timeout_ms: 150
     max_retries: 1
     on_failure: skip
 
   - id: policy_lookup
     service: policy-lookup-svc
     group: enrichment
-    timeout_ms: 40
+    timeout_ms: 150
     max_retries: 1
     on_failure: degrade
 
   - id: model_score
     service: model-service
     depends_on: [enrichment]
-    timeout_ms: 80
+    timeout_ms: 150
 
   - id: publish
     service: kafka-publisher

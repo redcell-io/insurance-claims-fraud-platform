@@ -557,3 +557,81 @@ node also succeeded (`"published to kafka"`, topic `claims.realtime`)
 confirming the dual-listener broker config. All 7 Prometheus targets
 showed `"health":"up"` via their compose service-name addresses. Not
 yet deployed to an actual VM — that's the next step.
+
+## 20. Fixed 502s from cold gRPC reconnects after long idle gaps — widened timeout budgets and added client keepalive, deliberately both
+
+Surfaced by the #19 deploy stack itself sitting idle for hours between
+manual test hits: `POST /v1/claims` returned `502 Bad Gateway` in
+~300ms. orchestration-service's logs showed every enrichment node
+(`claimant_id_hash`, `address_normalize`, `policy_lookup`) failing with
+`DeadlineExceeded ... while waiting for connections to become ready` —
+not one dependency down, all of them, intermittently, while
+`docker stats` showed the host otherwise idle.
+
+**Root cause**: `grpc.NewClient` dials lazily and grpc-go's default
+channel `idle_timeout` (30 min) drops a quiet connection back to `IDLE`.
+#17's `telemetry.WarmUp` only pays the reconnect cost once at startup —
+it doesn't re-fire after a channel re-idles later. `claim.fnol.yaml`'s
+enrichment nodes budgeted **40ms per attempt** (80ms with their one
+retry) — nowhere near enough for a fresh TCP/HTTP2 handshake over Docker
+Desktop/WSL2 networking, so the first request after a multi-hour gap
+reliably blew its budget, hit `fail_fast`, and claims-gateway turned
+that into a 502 (`internal/handler/claims.go`'s `orchestration call
+failed` branch).
+
+**Shipped two fixes together, not either/or**: widening the timeout
+budget alone would make a cold reconnect *survivable* but wouldn't
+reduce how often a live request actually pays for one; keepalive alone
+narrows that window but can't be relied on as the whole fix, because
+production will always eventually force a fresh dial regardless of
+keepalive — pod restarts, rolling deploys, a cloud LB/NAT silently
+evicting an idle TCP session it was tracking. A timeout sized only for
+"channel is already warm" fails on every one of those in prod, not just
+once every 19 hours like this local demo.
+
+1. **Widened the budget** (`claim.fnol.yaml` v4→v5): the three
+   enrichment nodes and `model_score` went from 40ms/80ms to **150ms**
+   per attempt — claims-gateway's own orchestration-call deadline is 5s,
+   so there's ample room. `config/tenants.yaml`'s `dag_versions.auto`
+   bumped 4→5 to match (a log-only version-mismatch warning otherwise,
+   not a hard failure, but worth keeping in sync).
+2. **Added client-side keepalive** (`pkg/telemetry/keepalive.go`,
+   `KeepaliveDialOption()`) to all 7 outbound gRPC clients (5 in
+   orchestration-service, 2 in claims-gateway) — `PermitWithoutStream:
+   true` so pings fire during the long idle gaps this targets, not just
+   mid-stream. This converts dead-connection discovery from "the next
+   live request finds out the hard way" to "a background ping finds out
+   and the channel is already reconnecting by the time a request
+   arrives" — specifically targets the half-open-TCP/middlebox-eviction
+   failure mode, which widening the timeout alone does nothing to
+   prevent.
+
+**Self-inflicted near-miss worth flagging**: the first keepalive
+interval picked was 20s. grpc-go's (and grpc-java's) default server-side
+keepalive *enforcement policy* rejects client pings more frequent than
+5 minutes — the actual result was every outbound connection getting
+killed with `GOAWAY ENHANCE_YOUR_CALM / too_many_pings` shortly after
+each request, i.e. strictly worse than no keepalive (forced reconnect
+churn instead of a stable warm connection). Caught immediately via
+container logs after redeploying; fixed by raising `Time` to 10 minutes
+— comfortably above the 5-minute server-side floor, still well under
+the 30-minute idle_timeout it's meant to pre-empt. **Lesson: a
+client-side keepalive interval must be picked relative to the peer's
+enforcement policy, not just the idle_timeout it's trying to beat** —
+the two defaults aren't related to each other and an interval safe
+against one can get you punished by the other.
+
+**Verified end-to-end** (local Docker Desktop, 2026-11-19): rebuilt and
+restarted `orchestration-service`, `claims-gateway`, and
+`tenant-config-svc`; `go build`/`go test` clean across
+`services/orchestration-service`, `services/claims-gateway`,
+`pkg/telemetry`. Post-fix `POST /v1/claims` returned `200` in 30-150ms
+with no `DeadlineExceeded`, no version-mismatch warning, and no GoAway
+errors in the logs.
+
+**Not attempted this pass**: a real topology-aware fix (e.g. the
+enrichment "group" still runs sequentially per node, not actually
+concurrently — see `executor.go`'s own comment on that simplification)
+would shrink the worst-case latency further; out of scope for a
+connection-health fix. mTLS, mentioned in #18's open list, remains
+open.

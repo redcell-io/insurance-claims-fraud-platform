@@ -11,7 +11,7 @@ tenants:
     display_name: "Acme Insurance Co"
     status: active
     dag_versions:
-      auto: 4
+      auto: 5
 
   - tenant_id: globex_insurance
     display_name: "Globex Insurance Co"

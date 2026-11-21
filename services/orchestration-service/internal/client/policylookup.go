@@ -22,6 +22,7 @@ func DialPolicyLookup(addr string, logger *slog.Logger) (*PolicyLookupClient, er
 	conn, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithUnaryInterceptor(telemetry.UnaryClientInterceptor(logger)),
+		telemetry.KeepaliveDialOption(),
 	)
 	if err != nil {
 		return nil, err

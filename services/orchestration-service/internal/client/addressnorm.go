@@ -29,6 +29,7 @@ func DialAddressNorm(addr string, logger *slog.Logger) (*AddressNormClient, erro
 	conn, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithUnaryInterceptor(telemetry.UnaryClientInterceptor(logger)),
+		telemetry.KeepaliveDialOption(),
 	)
 	if err != nil {
 		return nil, err
