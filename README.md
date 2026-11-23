@@ -28,8 +28,17 @@ timeout/retry enforcement landed next (resilience/observability, thin
 slice — [DECISIONS.md](DECISIONS.md) #17), followed by **Prometheus RED
 metrics** — every service exposes `/metrics`, scraped by a new
 `prometheus` container — see [DECISIONS.md](DECISIONS.md) #18.
-OpenTelemetry tracing/Jaeger and Grafana dashboards are still deferred.
-See [DECISIONS.md](DECISIONS.md) for the rest of what's still deferred
+All 7 services are now **fully containerized** for a demo-grade VM
+deploy (`docker-compose.deploy.yml`, a Dockerfile per service —
+[DECISIONS.md](DECISIONS.md) #19), with a cold-reconnect/idle-timeout
+502 fixed along the way (#20). **Terraform scaffolding for the actual
+OCI deployment** now exists under
+[infra/terraform/oci/](infra/terraform/oci/README.md) — provisions the
+VM + networking, with images built locally and pushed to OCIR rather
+than built on the VM (see [DECISIONS.md](DECISIONS.md) #21) — but
+hasn't been applied against a real OCI account yet. OpenTelemetry
+tracing/Jaeger and Grafana dashboards are still deferred. See
+[DECISIONS.md](DECISIONS.md) for the rest of what's still deferred
 (batch flow, real ONNX/ML inference, and layer 2's own remaining scope:
 Postgres, transactional outbox, Kafka cache invalidation, JSON Schema
 validation, API-key auth).
@@ -41,11 +50,20 @@ claim-fraud-platform/
 ├── DESIGN.md                       # architecture design doc
 ├── DECISIONS.md                     # running log of build decisions + rationale
 ├── RUNBOOK.md                        # how to build, run, test, troubleshoot
-├── docker-compose.yml               # local dev infra + services
+├── docker-compose.yml               # local dev infra: broker + prometheus (host-native services)
+├── docker-compose.deploy.yml         # fully-containerized stack (demo-grade VM deploy, builds locally)
+├── docker-compose.deploy.images.yml  # override: pre-built OCIR images instead of build: (used on the VM)
+├── infra/
+│   ├── docker/                      # (legacy placeholder — real per-service Dockerfiles live in services/*/)
+│   └── terraform/oci/               # Terraform: OCI VM + networking for the actual deploy (DECISIONS.md #21)
+├── scripts/
+│   ├── start-all.sh                 # host-native dev loop — all 7 services
+│   └── build-and-push-oci.sh        # builds all 7 images for linux/arm64, pushes to OCIR
 ├── proto/                           # shared .proto contracts (single source of truth)
 ├── config/                          # tenant + DAG config YAML (shared, not nested in a service)
 │   ├── tenants.yaml
-│   ├── prometheus.yml               # scrape config for the prometheus container
+│   ├── prometheus.yml               # scrape config: host-native dev loop (host.docker.internal)
+│   ├── prometheus.docker.yml        # scrape config: docker-compose.deploy.yml (compose service names)
 │   └── dag/{tenant_id}/{product}/{event_type}.yaml
 ├── pkg/telemetry/                   # shared Go logging + gRPC interceptors + Prometheus metrics
 ├── services/
@@ -56,8 +74,8 @@ claim-fraud-platform/
 │   ├── address-normalization-svc/   # Java 25 / Spring Boot / Maven — enrichment
 │   ├── policy-lookup-svc/           # Java 25 / Spring Boot / Maven — enrichment
 │   └── model-service/               # rules-based fraud-scoring (not ML yet)
-├── frontend/                        # React
-└── infra/docker/                    # per-service Dockerfiles
+│       # each service/*/Dockerfile builds that service for docker-compose.deploy.yml
+└── frontend/                        # React
 ```
 
 ## Prerequisites

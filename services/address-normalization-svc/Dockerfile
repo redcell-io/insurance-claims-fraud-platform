@@ -5,11 +5,18 @@
 FROM eclipse-temurin:25-jdk AS build
 
 ARG MAVEN_VERSION=3.9.9
+# bsdtar (libarchive-tools), not GNU tar: GNU tar hits "Function not
+# implemented" extracting this archive under QEMU's user-mode emulation
+# (buildx --platform linux/arm64 cross-build on an amd64 host, e.g.
+# scripts/build-and-push-oci.sh) — a QEMU syscall-coverage gap, confirmed
+# reproducible even after refreshing binfmt handlers and recreating the
+# builder. Doesn't affect a native build (e.g. directly on arm64
+# hardware); bsdtar sidesteps the gap either way.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl libarchive-tools \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o /tmp/maven.tar.gz \
-    && tar -xzf /tmp/maven.tar.gz -C /opt \
+    && bsdtar -xzf /tmp/maven.tar.gz -C /opt \
     && rm /tmp/maven.tar.gz
 ENV MAVEN_HOME=/opt/apache-maven-${MAVEN_VERSION}
 ENV PATH="${MAVEN_HOME}/bin:${PATH}"

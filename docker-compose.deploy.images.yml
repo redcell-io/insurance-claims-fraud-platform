@@ -1,0 +1,37 @@
+# Override for docker-compose.deploy.yml that swaps every claim-fraud-
+# platform service's `build:` for a pre-built `image:` pulled from OCIR
+# (DECISIONS.md #21) — used on the actual VM, which never clones this
+# repo and so never hits the proto/gen/go gap `docker compose build`
+# would (DECISIONS.md #19). The broker and prometheus services are
+# untouched; they already use public images.
+#
+# Usage (locally, after scripts/build-and-push-oci.sh has pushed
+# images): `docker compose -f docker-compose.deploy.yml -f
+# docker-compose.deploy.images.yml up -d` — `docker compose` resolves
+# the merged config's `image:` over `build:` as long as the image is
+# already pullable/local, so this never triggers a local build.
+#
+# OCIR_REGION (e.g. iad.ocir.io) and OCIR_NAMESPACE must be set in the
+# environment — infra/terraform/oci's cloud-init sets both before
+# invoking this; set them yourself if running this file by hand.
+services:
+  tenant-config-svc:
+    image: ${OCIR_REGION}.ocir.io/${OCIR_NAMESPACE}/claimfraud/tenant-config-svc:${IMAGE_TAG:-latest}
+
+  model-service:
+    image: ${OCIR_REGION}.ocir.io/${OCIR_NAMESPACE}/claimfraud/model-service:${IMAGE_TAG:-latest}
+
+  claimant-id-hashing-svc:
+    image: ${OCIR_REGION}.ocir.io/${OCIR_NAMESPACE}/claimfraud/claimant-id-hashing-svc:${IMAGE_TAG:-latest}
+
+  address-normalization-svc:
+    image: ${OCIR_REGION}.ocir.io/${OCIR_NAMESPACE}/claimfraud/address-normalization-svc:${IMAGE_TAG:-latest}
+
+  policy-lookup-svc:
+    image: ${OCIR_REGION}.ocir.io/${OCIR_NAMESPACE}/claimfraud/policy-lookup-svc:${IMAGE_TAG:-latest}
+
+  orchestration-service:
+    image: ${OCIR_REGION}.ocir.io/${OCIR_NAMESPACE}/claimfraud/orchestration-service:${IMAGE_TAG:-latest}
+
+  claims-gateway:
+    image: ${OCIR_REGION}.ocir.io/${OCIR_NAMESPACE}/claimfraud/claims-gateway:${IMAGE_TAG:-latest}

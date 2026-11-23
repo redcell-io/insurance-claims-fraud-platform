@@ -635,3 +635,133 @@ concurrently — see `executor.go`'s own comment on that simplification)
 would shrink the worst-case latency further; out of scope for a
 connection-health fix. mTLS, mentioned in #18's open list, remains
 open.
+
+## 21. Terraform on OCI for the actual VM deploy, with a registry-image pipeline instead of building on the VM
+
+Continues #19's "containerize, then deploy to a VM" plan — picks the
+actual cloud (Oracle Cloud now, AWS later, per the user's own framing)
+and the provisioning tool (Terraform, specifically for cheap, complete
+teardown via `terraform destroy`, which matters for a demo-grade
+project nobody wants silently billing after a session ends).
+
+**OCI over the originally-planned Hostinger VM**: OCI's Always Free tier
+includes an Ampere A1 (ARM) shape up to 4 OCPU/24GB — enough to run all
+7 services + broker + Prometheus on one box, for free, which beats a
+paid Hostinger VM for a demo-grade deployment with no real traffic.
+Tradeoff: Ampere A1 is **ARM (aarch64)**, not x86_64 — every image has
+to be built for `linux/arm64` specifically (see
+`scripts/build-and-push-oci.sh`'s `docker buildx build --platform
+linux/arm64`), not just built normally on an x86 dev machine. All of
+this repo's base images (`golang`, `eclipse-temurin:25-*`,
+`gcr.io/distroless/static-debian12`, Redpanda, Prometheus) already
+publish `arm64` manifests, so this cost is real but small — no base
+image had to change.
+
+**Terraform scope is deliberately narrow: networking + the VM only**
+(`infra/terraform/oci/`) — a VCN, one public subnet, an NSG opening
+only `22` (SSH, restricted via `ssh_allowed_cidr`), `8080` (REST), and
+`9090` (Prometheus UI; the gRPC/per-service-metrics ports stay
+container-internal, reachable only via an SSH tunnel), and one
+`VM.Standard.A1.Flex` instance. Not provisioning OKE/Kubernetes, a load
+balancer, or multiple instances — there's one service surface and no
+real traffic, so a single VM running `docker-compose.deploy.yml`
+(already built, #19) is the right amount of infrastructure, same
+"smaller, verifiable, one layer at a time" reasoning as every other
+thin-slice decision in this file.
+
+**Solves #19's "known gap, explicitly not solved that pass" (`proto/gen/go`
+doesn't exist on a fresh clone, so `docker compose build` on the VM
+fails) by not building on the VM at all.** `scripts/build-and-push-oci.sh`
+builds all 7 images locally — where `proto/gen/go` already exists,
+generated via `proto/generate.sh` — and pushes them to OCIR
+(`<region>.ocir.io/<namespace>/claimfraud/<service>`). The VM only ever
+runs `docker compose -f docker-compose.deploy.yml -f
+docker-compose.deploy.images.yml pull && up -d` — the new
+`.images.yml` override swaps every service's `build:` for a pre-built
+`image:`, so `docker compose` never tries to build anything there.
+Considered instead: installing a protoc toolchain in the Go
+`Dockerfile`s' build stage so the VM really could `git clone && docker
+compose build` — rejected as more moving parts (protoc install, plugin
+versions) duplicated into every Go Dockerfile for a problem the
+registry pipeline sidesteps entirely.
+
+**The VM never clones this repo at all, and needs no repo credentials**
+(public or private). `infra/terraform/oci/compute.tf` reads
+`docker-compose.deploy.yml`, the new `docker-compose.deploy.images.yml`,
+and the handful of `config/` files the deploy stack needs, straight off
+local disk at `terraform apply` time, and ships them to the instance as
+base64-encoded cloud-init `write_files` entries. This also means
+"what's running" is pinned to exactly what was applied, not whatever
+`HEAD` happened to be at boot — a property git-clone-on-boot wouldn't
+have given for free.
+
+**Auth token embedded in cloud-init user_data, in plaintext — an
+accepted demo-grade shortcut, not an oversight.** OCIR doesn't accept
+the Terraform provider's own API-signing-key auth for `docker login`;
+it needs a separate auth token (`var.ocir_auth_token`, marked
+`sensitive` in Terraform's own output-redaction sense, which does
+**not** stop it from being readable in plaintext from the instance's
+own metadata service). The correct production fix is instance-principal
+auth (a dynamic group + IAM policy granting the VM itself pull rights,
+no embedded secret at all) — not done here, flagged explicitly in
+`infra/terraform/oci/README.md`'s "what's deliberately not here"
+section, same convention as every other accepted shortcut in this file.
+
+**No remote Terraform state, no CI.** `terraform.tfstate` is local and
+gitignored — correct for a solo project where only one machine ever
+runs `apply`; would need an S3/OCI-Object-Storage backend the moment
+that's no longer true. `scripts/build-and-push-oci.sh` is run by hand;
+a GitHub Actions workflow invoking it on every push to `main` is the
+obvious next step, not done here.
+
+**This code will not port to AWS later, even though the workflow will.**
+OCI's resource model (compartments, VCNs, NSGs) and AWS's (VPC, EC2
+security groups, IAM roles) are different enough that
+`infra/terraform/aws/` will be a rewrite of the resource blocks, not a
+provider swap on the same file. What does carry over: the
+registry-image-pull pattern (ECR instead of OCIR), the cloud-init
+`write_files` approach, and the `plan`/`apply`/`destroy` workflow
+itself — worth being explicit about so "Terraform now, AWS later" isn't
+read as "same code, new provider."
+
+**Verified locally, 2026-11-23 — `fmt`/`init`/`validate` pass, and all 7
+images actually cross-build for `linux/arm64`.** This closes the original
+"written but unexecuted" gap for everything that doesn't need a live OCI
+account: `terraform fmt -check`, `init`, and `validate` all succeed
+(this machine's own broken IPv6 path to `registry.terraform.io` was the
+only blocker — a local-network issue, not a `.tf` problem; fixed with a
+hosts-file IPv4 pin, see RUNBOOK.md's Troubleshooting entry). Two real
+bugs turned up and were fixed in the process, both exactly the kind of
+thing this verification pass exists to catch before `terraform apply`
+or a push:
+- `scripts/build-and-push-oci.sh:25` had a literal apostrophe inside a
+  `${VAR:?message}` parameter-expansion message ("...for your region's
+  key") — confirmed via isolated repro that this breaks bash's parser
+  even though the whole construct is inside double quotes (the `:?word`
+  text gets its own internal quote handling). The script would have
+  failed on its very first invocation. Fixed by rephrasing the message
+  to avoid the apostrophe.
+- All 3 Java Dockerfiles' Maven-archive extraction (`tar -xzf`) failed
+  with `Function not implemented` specifically when cross-building via
+  `docker buildx --platform linux/arm64` through QEMU emulation on this
+  amd64 dev machine — a QEMU user-mode syscall-coverage gap (confirmed
+  reproducible even after refreshing binfmt handlers and recreating the
+  builder from scratch), not a Dockerfile logic error, and not something
+  that would happen on the real Ampere VM's native arm64 hardware.
+  Fixed by installing `libarchive-tools` and extracting with `bsdtar`
+  instead of GNU `tar` in all three Java Dockerfiles — surgical, keeps
+  this entry's build-locally-push-to-OCIR architecture completely
+  intact. After the fix, all 7 services (4 Go, 3 Java) were actually
+  built for `linux/arm64` end-to-end, including the Java build stage's
+  full `mvn package` — which is the real, empirical confirmation that
+  `os-maven-plugin`'s dynamic `linux-aarch_64` protoc resolution
+  (asserted but untested in this entry's original text) genuinely works
+  under real cross-compilation, not just in theory.
+
+**Still not applied against a real OCI account.** `terraform plan`
+needs real credentials (tenancy/user OCID, API signing key, compartment,
+SSH key, OCIR auth token — see `infra/terraform/oci/README.md`
+"Prerequisites") that don't exist yet, and the actual `--push` to OCIR
+and `terraform apply` are both still ahead. Everything verifiable
+without those now has been verified; treat only the `plan`/`apply`/
+real-registry-push path as still unexecuted.

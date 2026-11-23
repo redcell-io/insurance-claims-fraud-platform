@@ -394,3 +394,38 @@ reliable workaround for now.
   `docker compose down && docker compose up -d` (a plain `docker restart`
   isn't enough — start clean). No volumes are configured, so topic data
   doesn't persist across the `down` either way (see step 4a).
+
+- **`terraform init` (in `infra/terraform/oci/`) fails with `could not
+  connect to registry.terraform.io ... wsarecv: An existing connection
+  was forcibly closed by the remote host`:** this machine's IPv6 path to
+  that host is broken (confirmed via `curl -4 https://registry.terraform.io`
+  succeeding while `curl -6` fails outright) — a local-network quirk, not
+  a problem with the `.tf` files. `curl` (plain, dual-stack) falls back to
+  IPv4 automatically and works fine; Terraform's Go dialer doesn't recover
+  from this particular failure mode (the IPv6 TCP connect succeeds, only
+  the follow-up TLS handshake gets reset, which is past the point Go's
+  Happy-Eyeballs fallback protects against), so it hard-fails instead.
+
+  **Fix — pin that one hostname to its IPv4 address in the hosts file**
+  (needs an actually-elevated PowerShell: `Win+X` → "Terminal (Admin)" /
+  "Windows PowerShell (Admin)", not just a window with "admin" in the
+  title — verify with `net session >$null 2>&1; if ($?) { "ELEVATED" }
+  else { "NOT ELEVATED" }` before proceeding):
+  ```powershell
+  # find a current IPv4 address first — CloudFront-backed, so it can rotate:
+  nslookup -type=A registry.terraform.io
+  Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" `
+    -Value "<that IPv4 address> registry.terraform.io" -Encoding utf8
+  ```
+  Safe even if the pinned IP later goes stale — TLS certificate validation
+  still applies, so a wrong/stale IP just fails the connection again, it
+  can't silently redirect you to an impostor host.
+
+  **Only needed for `terraform init`/`init -upgrade`** — once it succeeds,
+  the provider binary is cached under `infra/terraform/oci/.terraform/`
+  and pinned in `.terraform.lock.hcl`, so ordinary `validate`/`plan`/
+  `apply`/`destroy` never re-contact the registry. **Revert once done**
+  (delete the hosts entry — it's one line, remove it with any text editor
+  or `Set-Content` rewriting the file without that line) rather than
+  leaving it indefinitely; re-add it the same way if `.terraform/` ever
+  gets wiped or a provider version bumps.
