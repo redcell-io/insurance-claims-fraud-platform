@@ -1,20 +1,29 @@
 #!/usr/bin/env bash
 # Regenerates Go protobuf/gRPC stubs from proto/*.proto into proto/gen/go/.
 #
-# Requires: tools/protoc/bin/protoc.exe (portable, see README.md) and the
-# protoc-gen-go / protoc-gen-go-grpc plugins on PATH:
+# Requires a protoc binary and the protoc-gen-go / protoc-gen-go-grpc
+# plugins on PATH:
 #   go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 #   go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+#
+# protoc itself: on this repo's Windows dev machine, the portable
+# tools/protoc/bin/protoc.exe (see README.md). On Linux (e.g. a VM deploy,
+# DECISIONS.md #21), install it instead (`apt install protobuf-compiler`)
+# and this script falls back to resolving `protoc` from PATH.
 #
 # Java stubs are NOT generated here — each Java service generates its own
 # via the protobuf-maven-plugin at build time (see
 # services/address-normalization-svc/pom.xml), which also auto-fetches its
-# own protoc, so it doesn't depend on tools/protoc/.
+# own protoc, so it doesn't depend on tools/protoc/ or this fallback.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 export PATH="$PATH:$(go env GOPATH)/bin"
-PROTOC="tools/protoc/bin/protoc.exe"
+if [ -x "tools/protoc/bin/protoc.exe" ]; then
+  PROTOC="tools/protoc/bin/protoc.exe"
+else
+  PROTOC="protoc"
+fi
 
 "$PROTOC" -I proto \
   --go_out=proto/gen/go --go_opt=paths=source_relative \
