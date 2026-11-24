@@ -8,8 +8,10 @@ private_key_path = "~/.oci/oci_api_key.pem"
 region           = "us-ashburn-1"
 compartment_ocid = "ocid1.compartment.oc1..xxxxx" # or the tenancy_ocid itself, for the root compartment
 
-ssh_public_key   = "ssh-ed25519 AAAA... you@yourmachine"
-ssh_allowed_cidr = "203.0.113.5/32" # YOUR IP, not 0.0.0.0/0
+ssh_public_key          = "ssh-ed25519 AAAA... you@yourmachine"
+ssh_allowed_cidr        = "203.0.113.5/32" # YOUR IP, not 0.0.0.0/0
+rest_allowed_cidr       = "0.0.0.0/0"      # fine public — that's the point of the demo
+prometheus_allowed_cidr = "203.0.113.5/32" # no auth on that UI — keep this one narrow
 
 ocir_region_key  = "iad" # us-ashburn-1 -> iad; see provider docs for your region's key
 ocir_namespace   = "yourtenancynamespace"

@@ -62,7 +62,7 @@ resource "oci_core_network_security_group_security_rule" "rest_ingress" {
   network_security_group_id = oci_core_network_security_group.instance.id
   direction                 = "INGRESS"
   protocol                  = "6"
-  source                    = var.demo_allowed_cidr
+  source                    = var.rest_allowed_cidr
   source_type               = "CIDR_BLOCK"
   tcp_options {
     destination_port_range {
@@ -78,7 +78,7 @@ resource "oci_core_network_security_group_security_rule" "prometheus_ingress" {
   network_security_group_id = oci_core_network_security_group.instance.id
   direction                 = "INGRESS"
   protocol                  = "6"
-  source                    = var.demo_allowed_cidr
+  source                    = var.prometheus_allowed_cidr
   source_type               = "CIDR_BLOCK"
   tcp_options {
     destination_port_range {

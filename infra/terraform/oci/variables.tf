@@ -42,9 +42,15 @@ variable "ssh_allowed_cidr" {
   description = "CIDR allowed to SSH in (port 22). Restrict this to your own IP/32 — never leave it 0.0.0.0/0."
 }
 
-variable "demo_allowed_cidr" {
+variable "rest_allowed_cidr" {
   type        = string
-  description = "CIDR allowed to reach the public demo endpoints (REST :8080, Prometheus UI :9090). 0.0.0.0/0 is the point of a public demo, but narrow it if this is ever more than a throwaway."
+  description = "CIDR allowed to reach the claims-gateway REST API (:8080). 0.0.0.0/0 is the point of a public demo, but narrow it if this is ever more than a throwaway."
+  default     = "0.0.0.0/0"
+}
+
+variable "prometheus_allowed_cidr" {
+  type        = string
+  description = "CIDR allowed to reach the Prometheus UI (:9090). No auth on that UI at all, so — unlike rest_allowed_cidr — this defaults to being wide open too, but should usually be narrowed to your own IP; widen it back temporarily only when you actually want to share a live demo link."
   default     = "0.0.0.0/0"
 }
 
