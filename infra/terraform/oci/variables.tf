@@ -62,6 +62,12 @@ variable "instance_shape" {
   description = "Always Free eligible on OCI: up to 4 OCPU / 24GB total across all A1.Flex instances in a tenancy."
 }
 
+variable "availability_domain_index" {
+  type        = number
+  default     = 0
+  description = "Index into data.oci_identity_availability_domains.ads.availability_domains (0 = AD-1, 1 = AD-2, 2 = AD-3). Ampere A1 capacity is tracked per-AD, not per-region — Oracle's well-known \"Out of host capacity\" error on a fresh A1.Flex launch is common and doesn't mean anything is misconfigured; retry with a different index (terraform apply -var=\"availability_domain_index=1\") rather than assuming the Terraform config is broken."
+}
+
 variable "instance_ocpus" {
   type    = number
   default = 4

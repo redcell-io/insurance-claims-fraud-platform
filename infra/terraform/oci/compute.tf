@@ -43,7 +43,7 @@ locals {
 
 resource "oci_core_instance" "this" {
   compartment_id      = var.compartment_ocid
-  availability_domain = data.oci_identity_availability_domains.ads.availability_domains[0].name
+  availability_domain = data.oci_identity_availability_domains.ads.availability_domains[var.availability_domain_index].name
   display_name        = "${var.display_name_prefix}-vm"
   shape               = var.instance_shape
 
