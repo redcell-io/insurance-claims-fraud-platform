@@ -3,6 +3,7 @@ resource "oci_core_vcn" "this" {
   cidr_blocks    = [var.vcn_cidr]
   display_name   = "${var.display_name_prefix}-vcn"
   dns_label      = "claimfraud"
+  freeform_tags  = var.common_tags
 }
 
 resource "oci_core_internet_gateway" "this" {
@@ -10,6 +11,7 @@ resource "oci_core_internet_gateway" "this" {
   vcn_id         = oci_core_vcn.this.id
   display_name   = "${var.display_name_prefix}-igw"
   enabled        = true
+  freeform_tags  = var.common_tags
 }
 
 # The VCN's auto-created default route table — edited in place rather
@@ -18,6 +20,7 @@ resource "oci_core_internet_gateway" "this" {
 # tier — demo-grade, per DECISIONS.md #19/#21).
 resource "oci_core_default_route_table" "this" {
   manage_default_resource_id = oci_core_vcn.this.default_route_table_id
+  freeform_tags              = var.common_tags
 
   route_rules {
     destination       = "0.0.0.0/0"
@@ -34,12 +37,14 @@ resource "oci_core_subnet" "public" {
   dns_label                  = "public"
   route_table_id             = oci_core_default_route_table.this.id
   prohibit_public_ip_on_vnic = false
+  freeform_tags              = var.common_tags
 }
 
 resource "oci_core_network_security_group" "instance" {
   compartment_id = var.compartment_ocid
   vcn_id         = oci_core_vcn.this.id
   display_name   = "${var.display_name_prefix}-nsg"
+  freeform_tags  = var.common_tags
 }
 
 # SSH — restrict ssh_allowed_cidr to your own IP/32 in terraform.tfvars.
@@ -92,6 +97,11 @@ resource "oci_core_network_security_group_security_rule" "prometheus_ingress" {
 # metrics (919x) ports — those are container-to-container only in
 # docker-compose.deploy.yml. Reach them for debugging via an SSH tunnel
 # (`ssh -L 9092:localhost:9092 ...`), not a public NSG rule.
+#
+# None of the oci_core_network_security_group_security_rule resources
+# above take freeform_tags — they're sub-rules of the NSG, not
+# standalone taggable resources (same limitation Azure's
+# azurerm_network_security_rule has).
 
 resource "oci_core_network_security_group_security_rule" "egress_all" {
   network_security_group_id = oci_core_network_security_group.instance.id

@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# Builds all 7 claim-fraud-platform service images for linux/arm64 (the
-# OCI Ampere A1 Always Free shape infra/terraform/oci provisions — NOT
-# this machine's native arch, which is why `docker buildx build
-# --platform linux/arm64` is required here instead of a plain `docker
-# build`) and pushes them to OCIR. Run this from the repo root, after
-# `proto/generate.sh` (proto/gen/go must exist on disk — see each
-# service's Dockerfile and DECISIONS.md #19's "known gap").
+# Builds all 7 claim-fraud-platform service images and pushes them to
+# OCIR. Run this from the repo root, after `proto/generate.sh`
+# (proto/gen/go must exist on disk — see each service's Dockerfile and
+# DECISIONS.md #19's "known gap").
 #
 # This is what actually resolves that gap: images are built here, where
 # proto/gen/go already exists, and the VM only ever pulls them
 # (docker-compose.deploy.images.yml) — it never runs `docker compose
 # build` against a bare git clone. See DECISIONS.md #21.
+#
+# PLATFORM defaults to linux/arm64 — the OCI Ampere A1 Always Free shape
+# (infra/terraform/oci) and Azure's B2pts v2 (infra/terraform/azure)
+# both run it, NOT this machine's native arch, which is why `docker
+# buildx build --platform ...` is required here instead of a plain
+# `docker build`. infra/terraform/aws's t3.medium is x86_64 — build for
+# it with `PLATFORM=linux/amd64 IMAGE_TAG=latest-amd64` (a distinct tag
+# so it doesn't overwrite the arm64 set at `:latest`); still the same
+# registry, no separate build pipeline per architecture.
 #
 # Requires: docker buildx (ships with modern Docker Desktop), and
 # `docker login <region>.ocir.io` already done (or export
@@ -19,6 +25,7 @@
 #
 # Usage:
 #   OCIR_REGION=iad OCIR_NAMESPACE=yourtenancynamespace ./scripts/build-and-push-oci.sh
+#   PLATFORM=linux/amd64 IMAGE_TAG=latest-amd64 OCIR_REGION=iad OCIR_NAMESPACE=yourtenancynamespace ./scripts/build-and-push-oci.sh
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -26,6 +33,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 : "${OCIR_NAMESPACE:?set OCIR_NAMESPACE — find via: oci os ns get}"
 OCIR_HOST="${OCIR_REGION}.ocir.io"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
+PLATFORM="${PLATFORM:-linux/arm64}"
 
 if [ -n "${OCIR_AUTH_TOKEN:-}" ] && [ -n "${OCIR_USERNAME:-}" ]; then
   echo "$OCIR_AUTH_TOKEN" | docker login "$OCIR_HOST" -u "$OCIR_USERNAME" --password-stdin
@@ -54,9 +62,9 @@ declare -A services=(
 for svc in "${!services[@]}"; do
   dockerfile="${services[$svc]}"
   tag="${OCIR_HOST}/${OCIR_NAMESPACE}/claimfraud/${svc}:${IMAGE_TAG}"
-  echo "=== building + pushing ${tag} (linux/arm64) ==="
+  echo "=== building + pushing ${tag} (${PLATFORM}) ==="
   docker buildx build \
-    --platform linux/arm64 \
+    --platform "$PLATFORM" \
     -f "$dockerfile" \
     -t "$tag" \
     --push \

@@ -41,12 +41,18 @@ cloud-init `write_files` rather than a git clone — see `compute.tf`'s
 
 ## Usage
 
+Values genuinely identical across every cloud this repo deploys to (ssh
+key, CIDRs, OCIR creds) live one level up in `../shared.tfvars`, not
+here — see `infra/terraform/shared.tfvars.example`. Both files are
+needed on every `plan`/`apply`:
+
 ```sh
 cd infra/terraform/oci
-cp terraform.tfvars.example terraform.tfvars   # fill in real values; gitignored
+cp ../shared.tfvars.example ../shared.tfvars   # if you haven't already — shared across clouds
+cp terraform.tfvars.example terraform.tfvars   # OCI-specific values; gitignored
 terraform init
-terraform plan    # review before applying — this creates real, billable-adjacent resources
-terraform apply
+terraform plan -var-file=../shared.tfvars -var-file=terraform.tfvars    # review before applying — this creates real, billable-adjacent resources
+terraform apply -var-file=../shared.tfvars -var-file=terraform.tfvars
 ```
 
 Then, from the repo root, build and push the 7 service images (must
@@ -82,7 +88,7 @@ curl -s -X POST http://<instance_public_ip>:8080/v1/claims \
 ## Tearing down
 
 ```sh
-terraform destroy
+terraform destroy -var-file=../shared.tfvars -var-file=terraform.tfvars
 ```
 
 This is the whole point of doing this in Terraform rather than clicking
@@ -109,13 +115,42 @@ left to forget about.
   Actions workflow doing this on every push to `main` is the obvious
   next step, not done here.
 
-## Porting to AWS later
+## Porting to another cloud
 
 Don't expect this directory's `.tf` files to port — OCI's resource
-model (compartments, VCNs, NSGs) and AWS's (VPC, EC2 security groups)
-are different enough that an `infra/terraform/aws/` later is a rewrite
-of the resource blocks, not a find-and-replace. What *does* carry over:
-the same `docker-compose.deploy.images.yml` + registry-pull pattern
-(swap OCIR for ECR), the same cloud-init `write_files` approach, and the
-same `terraform plan`/`apply`/`destroy` workflow and variable-naming
-conventions.
+model (compartments, VCNs, NSGs) and another cloud's (AWS's VPC/EC2
+security groups, Azure's resource groups/VNets) are different enough
+that a new `infra/terraform/<cloud>/` is a rewrite of the resource
+blocks, not a find-and-replace. What *does* carry over: the cloud-init
+`write_files` approach, the `terraform plan`/`apply`/`destroy` workflow,
+and the shared-tfvars split (`../shared.tfvars`) for values that are
+genuinely identical regardless of provider.
+
+**`infra/terraform/azure/` is a real example, not a hypothetical** —
+and it carries over more than expected: rather than swapping OCIR for a
+same-shaped registry (e.g. ECR), it reuses OCIR *unchanged*. OCIR is
+just a registry reachable over HTTPS; Azure's B2pts v2 (ARM, same
+architecture as the images already built here) pulls the exact same
+`ord.ocir.io/...` images this directory's VM does, via the same
+`docker-compose.deploy.images.yml` and the same
+`scripts/build-and-push-oci.sh` — no Azure Container Registry, no second
+build pipeline. A cloud whose compute architecture doesn't match (e.g.
+an x86_64-only shape) would need a second `--platform linux/amd64` build
+pass through that same script, but still no new registry.
+
+**`infra/terraform/aws/` confirms the x86_64 case directly** — its
+`t3.medium` isn't arm64, so it genuinely does need that second build
+pass (`PLATFORM=linux/amd64 IMAGE_TAG=latest-amd64
+scripts/build-and-push-oci.sh`, pushed under a distinct tag so it
+doesn't collide with the arm64 set at `:latest`), and `compute.tf`'s
+`templatefile()` call passes a different `image_tag` into the (still
+byte-for-byte-shared) `cloud-init.yaml.tftpl` as a result. Still no
+Elastic Container Registry, no second script — the only new thing is a
+second *tag*, not a second *registry* or *pipeline*. Also worth noting:
+AWS has no OCI/Azure-style "pass an SSH key directly as instance
+metadata" mechanism (needs an explicit `aws_key_pair` resource), and a
+custom `aws_security_group` needs an explicit egress rule for outbound
+access the way OCI's NSGs do (Azure's NSGs are the one of the three with
+a built-in default) — two more small but real per-provider differences,
+confirmed against the actual `hashicorp/aws` provider before writing any
+`.tf`, not assumed from the OCI/Azure pattern.

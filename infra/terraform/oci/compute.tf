@@ -38,6 +38,10 @@ locals {
     ocir_namespace  = var.ocir_namespace
     ocir_username   = var.ocir_username
     ocir_auth_token = var.ocir_auth_token
+    # "latest" — this VM is arm64, same architecture/tag as the images
+    # scripts/build-and-push-oci.sh already pushes by default. Only
+    # infra/terraform/aws (x86_64) needs a different value here.
+    image_tag = "latest"
   })
 }
 
@@ -46,6 +50,7 @@ resource "oci_core_instance" "this" {
   availability_domain = data.oci_identity_availability_domains.ads.availability_domains[var.availability_domain_index].name
   display_name        = "${var.display_name_prefix}-vm"
   shape               = var.instance_shape
+  freeform_tags       = merge(var.common_tags, { Name = "${var.display_name_prefix}-vm" })
 
   shape_config {
     ocpus         = var.instance_ocpus

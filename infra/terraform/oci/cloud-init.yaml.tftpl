@@ -30,8 +30,11 @@ runcmd:
   - echo '${ocir_auth_token}' | docker login ${ocir_host} -u '${ocir_username}' --password-stdin
   # OCIR_REGION is the bare region key (e.g. "iad") — docker-compose.deploy.images.yml
   # appends ".ocir.io" itself; passing ocir_host here would double it up.
-  - cd /opt/claimfraud && OCIR_REGION=${ocir_region_key} OCIR_NAMESPACE=${ocir_namespace} docker compose -f docker-compose.deploy.yml -f docker-compose.deploy.images.yml pull
-  - cd /opt/claimfraud && OCIR_REGION=${ocir_region_key} OCIR_NAMESPACE=${ocir_namespace} docker compose -f docker-compose.deploy.yml -f docker-compose.deploy.images.yml up -d
+  # IMAGE_TAG picks which architecture's pre-built images to pull — see
+  # compute.tf's templatefile() call; "latest" (arm64) for this VM, only
+  # infra/terraform/aws's VM (x86_64) passes a different tag here.
+  - cd /opt/claimfraud && OCIR_REGION=${ocir_region_key} OCIR_NAMESPACE=${ocir_namespace} IMAGE_TAG=${image_tag} docker compose -f docker-compose.deploy.yml -f docker-compose.deploy.images.yml pull
+  - cd /opt/claimfraud && OCIR_REGION=${ocir_region_key} OCIR_NAMESPACE=${ocir_namespace} IMAGE_TAG=${image_tag} docker compose -f docker-compose.deploy.yml -f docker-compose.deploy.images.yml up -d
 
 # Debugging a failed boot: `ssh ubuntu@<ip>` then
 # `sudo cat /var/log/cloud-init-output.log` shows every command above

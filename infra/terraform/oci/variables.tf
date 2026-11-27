@@ -101,6 +101,12 @@ variable "display_name_prefix" {
   default = "claimfraud"
 }
 
+variable "common_tags" {
+  type        = map(string)
+  default     = {}
+  description = "Applied via freeform_tags on every resource that supports it (OCI has no provider-level auto-tag mechanism, unlike AWS's default_tags). See ../shared.tfvars.example."
+}
+
 # --- Container registry (OCIR) — see scripts/build-and-push-oci.sh ---
 
 variable "ocir_region_key" {

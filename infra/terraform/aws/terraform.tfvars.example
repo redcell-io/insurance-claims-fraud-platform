@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars (gitignored) and fill in. See README.md
+# "Prerequisites" for where each value comes from. Values shared across
+# every cloud this repo deploys to (ssh key, CIDRs, OCIR creds) live in
+# ../shared.tfvars instead — apply with both -var-file flags.
+
+aws_region  = "us-east-1"
+aws_profile = "claimfraud" # named AWS CLI profile — never the account default; see README.md
+
+# Overrides ../shared.tfvars's "claimfraud" — nothing exists yet for AWS,
+# so this stack uses the corrected spelling from the start.
+display_name_prefix = "claimsfraud"

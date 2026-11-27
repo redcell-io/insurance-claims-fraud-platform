@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (gitignored) and fill in. See README.md
+# "Prerequisites" for where each value comes from. Values shared across
+# every cloud this repo deploys to (ssh key, CIDRs, OCIR creds) live in
+# ../shared.tfvars.example instead — apply with both -var-file flags.
+
+subscription_id     = "00000000-0000-0000-0000-000000000000" # `az account show --query id -o tsv`
+resource_group_name = "claimfraud-rg"
+location             = "eastus" # check B-series/ARM availability here first

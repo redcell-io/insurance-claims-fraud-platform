@@ -1,0 +1,46 @@
+#cloud-config
+# Rendered by compute.tf's templatefile() call — see that file's
+# `local.deploy_files`/`local.cloud_init` for what's injected here.
+#
+# Copied byte-for-byte from infra/terraform/oci/cloud-init.yaml.tftpl —
+# nothing here is OCI-specific, it only references deploy_files/ocir_*
+# template variables, both equally applicable to any cloud's VM. See
+# infra/terraform/oci/README.md "Porting to another cloud".
+#
+# Ships the deploy-stack's compose files + config/ straight from this
+# Terraform apply, base64-encoded to survive arbitrary YAML/compose
+# content untouched, rather than `git clone`-ing the repo onto the
+# instance — no repo credentials (public or private) ever need to exist
+# on the VM. See DECISIONS.md #21.
+write_files:
+%{ for path, content in deploy_files ~}
+  - path: /opt/claimfraud/${path}
+    encoding: b64
+    content: ${base64encode(content)}
+    owner: root:root
+    permissions: '0644'
+%{ endfor ~}
+
+runcmd:
+  # get.docker.com's convenience script installs both the Docker Engine
+  # and the compose plugin in one step — fine for a demo-grade single
+  # VM; a hardened setup would pin versions via the distro's own repo.
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker ubuntu
+  # --password-stdin keeps the token out of the process list, though it
+  # still sits in plaintext in this rendered cloud-init file itself
+  # (readable via the instance's own metadata service) — the accepted
+  # demo-grade tradeoff documented in variables.tf's ocir_auth_token and
+  # DECISIONS.md #21.
+  - echo '${ocir_auth_token}' | docker login ${ocir_host} -u '${ocir_username}' --password-stdin
+  # OCIR_REGION is the bare region key (e.g. "iad") — docker-compose.deploy.images.yml
+  # appends ".ocir.io" itself; passing ocir_host here would double it up.
+  # IMAGE_TAG picks which architecture's pre-built images to pull — see
+  # compute.tf's templatefile() call; "latest" (arm64) for this VM, only
+  # infra/terraform/aws's VM (x86_64) passes a different tag here.
+  - cd /opt/claimfraud && OCIR_REGION=${ocir_region_key} OCIR_NAMESPACE=${ocir_namespace} IMAGE_TAG=${image_tag} docker compose -f docker-compose.deploy.yml -f docker-compose.deploy.images.yml pull
+  - cd /opt/claimfraud && OCIR_REGION=${ocir_region_key} OCIR_NAMESPACE=${ocir_namespace} IMAGE_TAG=${image_tag} docker compose -f docker-compose.deploy.yml -f docker-compose.deploy.images.yml up -d
+
+# Debugging a failed boot: `ssh ubuntu@<ip>` then
+# `sudo cat /var/log/cloud-init-output.log` shows every command above
+# plus its output, in order.

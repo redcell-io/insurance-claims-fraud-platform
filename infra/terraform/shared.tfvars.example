@@ -1,0 +1,39 @@
+# Values genuinely identical across every cloud this repo deploys to —
+# copy to shared.tfvars (gitignored) and fill in once. Each cloud's own
+# directory (infra/terraform/oci/, infra/terraform/azure/) keeps only
+# what's actually specific to that provider in its own terraform.tfvars.
+# Apply with both: `terraform apply -var-file=../shared.tfvars
+# -var-file=terraform.tfvars` — see each cloud's own README.md.
+
+# RSA, not ed25519 — Azure's admin_ssh_key only accepts RSA keys (OCI
+# accepts either), discovered when a real `terraform plan` against Azure
+# rejected an ed25519 key with "Only RSA SSH keys are supported by
+# Azure." Generate with: ssh-keygen -t rsa -b 4096 -f ~/.ssh/<name>
+ssh_public_key          = "ssh-rsa AAAA... you@yourmachine"
+ssh_allowed_cidr        = "203.0.113.5/32" # YOUR IP, not 0.0.0.0/0
+rest_allowed_cidr       = "0.0.0.0/0"      # fine public — that's the point of the demo
+prometheus_allowed_cidr = "203.0.113.5/32" # no auth on that UI — keep this one narrow
+display_name_prefix     = "claimfraud" # kept as-is: OCI already has 9 live resources named claimfraud-*; renaming would force their recreation
+
+# Applied to every resource that supports it, across all three clouds —
+# AWS via the provider's default_tags block (automatic, no per-resource
+# repetition), Azure/OCI via an explicit tags/freeform_tags argument on
+# each taggable resource (neither provider has AWS's auto-apply
+# mechanism). Tags update in place (no resource replacement), unlike
+# display_name_prefix above, so this is safe to set here even for
+# already-created OCI resources.
+common_tags = {
+  Project     = "claimsfraud-platform"
+  Environment = "demo"
+  ManagedBy   = "terraform"
+}
+
+# OCIR (Oracle Container Registry) — shared because every cloud's VM
+# pulls the same pre-built images from here, not just OCI's own. See
+# infra/terraform/oci/README.md "Prerequisites" for where these come
+# from; scripts/build-and-push-oci.sh is still the only build/push path
+# regardless of which cloud(s) end up consuming the images.
+ocir_region_key = "iad" # see provider docs for your region's key
+ocir_namespace  = "yourtenancynamespace"
+ocir_username   = "yourtenancynamespace/your.email@example.com"
+ocir_auth_token = "generate-via-oci-console-my-profile-auth-tokens"

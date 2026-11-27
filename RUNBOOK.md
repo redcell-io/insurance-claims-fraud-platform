@@ -429,3 +429,21 @@ reliable workaround for now.
   or `Set-Content` rewriting the file without that line) rather than
   leaving it indefinitely; re-add it the same way if `.terraform/` ever
   gets wiped or a provider version bumps.
+
+- **`az login --use-device-code` keeps failing with `AADSTS70016:
+  Authorization is pending` even though the device-code page was
+  reached and signed into in a browser:** this is what happens when the
+  CLI's polling loop is driven from a non-interactive wrapper (a script,
+  an agent's background tool call) rather than a real interactive
+  terminal — repeatedly failed this way even left running 10+ minutes.
+  **Fix: run plain `az login` (no `--use-device-code`) directly in your
+  own interactive terminal instead** — it opens the normal account/
+  tenant picker and completes immediately. Related: `winget install -e
+  --id Microsoft.AzureCLI` needs an interactive session too (its UAC
+  elevation prompt fails silently, exit code 1602, if nothing can click
+  "Yes"), and a terminal already open before the install won't see `az`
+  on `PATH` until you open a new one (Windows updates the system `PATH`
+  registry value, but a running shell keeps its own stale copy — don't
+  mistake that for the install having failed). See
+  `infra/terraform/azure/README.md`'s "Prerequisites" for the full
+  writeup.

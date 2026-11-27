@@ -765,3 +765,115 @@ SSH key, OCIR auth token — see `infra/terraform/oci/README.md`
 and `terraform apply` are both still ahead. Everything verifiable
 without those now has been verified; treat only the `plan`/`apply`/
 real-registry-push path as still unexecuted.
+
+## 22. Added AWS as a third deploy target, cross-cloud resource tagging, and a teardown script
+
+Continues #21 directly. OCI's Ampere A1 capacity turned out to be
+persistently, not just momentarily, oversubscribed — two manual retries
+(daytime, overnight) plus an 11-attempt automated loop rotating all 3
+ADs all failed with the same `Out of host capacity` error. Rather than
+keep polling, added two more deploy targets: Azure (`infra/terraform/
+azure/`, `terraform plan` verified clean against a live account, `apply`
+not yet run — the account became inaccessible before that step) and AWS
+(`infra/terraform/aws/`, fully verified below).
+
+**AWS targets `t3.medium` (x86_64, 4GB), deliberately not the free-tier
+`t2.micro`/`t3.micro` (1GB)** — that size carries the same
+resource-starvation risk already rejected for GCP's e2-micro at the very
+start of this effort (the stack measures ~800MB+ RSS at idle alone,
+before OS/Docker overhead). This is a real, paid instance; the accepted
+tradeoff is verify-then-tear-down-immediately, not an attempt to find a
+free tier that fits.
+
+**A dedicated, narrowly-scoped IAM user, not the account's default
+credentials.** Automated infrastructure that creates and destroys real
+paid resources got its own IAM user (`AmazonEC2FullAccess` only — no
+IAM permissions, since nothing here creates roles/instance profiles),
+authenticated via a named AWS CLI profile (`aws configure set ... --profile
+claimfraud`) rather than overwriting or reusing the account's existing
+default-profile credentials. The access key was generated and written
+into that profile entirely via CLI (`aws iam create-access-key` piped
+straight into `aws configure set`) — the secret never appeared in chat,
+same practice as every other credential handled this effort.
+
+**Validated AWS-specific Terraform correctness in a dedicated research
+pass before writing any `.tf`** — real money on the line, no live
+hands-on AWS testing yet unlike OCI/Azure. Confirmed and then verified
+live against the account: the Canonical Ubuntu 22.04 x86_64 AMI
+lookup (`owners = ["099720109477"]`, the standard jammy HVM/SSD name
+filter, plus a `root-device-type = "ebs"` filter since `t3.medium` is
+EBS-only); that AWS has no OCI/Azure-style "pass an SSH key directly as
+instance metadata" mechanism and needs an explicit `aws_key_pair`
+resource; that `aws_instance.user_data` takes **plain text** (Terraform/
+AWS base64-encodes it internally — wrapping it in `base64encode()` the
+way OCI's `metadata.user_data`/Azure's `custom_data` both require would
+double-encode and break cloud-init parsing); that a custom
+`aws_security_group` with no `egress` block has **zero** outbound rules,
+not an implicit allow-all (AWS doesn't carry the default-VPC-SG's
+allow-all-egress behavior over to a security group you create yourself
+— needs an explicit allow-all egress rule, same reasoning as OCI's NSG,
+unlike Azure's NSG which does ship a built-in default); and that
+`associate_public_ip_address = true` directly on the instance is
+sufficient, no `aws_eip` needed (an EIP left behind would itself cost
+money if forgotten, a real risk for something meant to be short-lived).
+`terraform plan` against the live account confirmed all of this: 8
+resources to add, 0 errors, correct AMI resolution, before any `apply`.
+
+**Cross-cloud resource tagging — `common_tags` (`../shared.tfvars`),
+applied through three different mechanisms, not three different
+schemas.** AWS v5.x supports a provider-level `default_tags` block that
+auto-tags every taggable resource with zero per-resource repetition —
+the cleanest of the three. Azure's `azurerm` provider has no equivalent;
+`tags = var.common_tags` was added explicitly to each resource that
+supports it (`azurerm_subnet` and `azurerm_network_security_rule` don't
+support tags at all — Azure subnets aren't independently taggable).
+OCI's resources use `freeform_tags = var.common_tags` the same way
+(its own NSG security rules have the same no-tags-on-sub-resources
+limitation). Tags update in place on all three providers (confirmed via
+a live `terraform plan` on OCI's 9 already-created resources: 5 to
+change, 0 to destroy, no forced replacement) — a meaningfully different
+risk profile than renaming a resource itself, which is why this was
+safe to apply retroactively to OCI's live resources while
+`display_name_prefix` (which drives actual resource names) was not.
+
+**`claimfraud` → `claimsfraud` naming correction, scoped to new things
+only, not a full rename.** Caught mid-session that "claimsfraud" is the
+more correct name. Renaming `display_name_prefix`'s shared default would
+force Terraform to destroy and recreate OCI's 9 already-live resources
+(re-rolling the Ampere A1 capacity lottery for no real benefit) and
+require re-pushing all 7 images under a new OCIR path three other files
+already depend on — correctly judged not worth it. Landed on: the new
+`common_tags.Project` value uses "claimsfraud-platform" (tags update in
+place, no disruption either way), and `infra/terraform/aws/`
+specifically — nothing created there yet — overrides
+`display_name_prefix` to `"claimsfraud"` in its own `terraform.tfvars`
+rather than changing the shared default, so its resources are named
+`claimsfraud-*` from the start without touching OCI/Azure's naming.
+
+**`scripts/teardown-cloud.sh <oci|azure|aws>`** — a thin wrapper around
+`terraform destroy -var-file=../shared.tfvars -var-file=terraform.tfvars`
+for whichever cloud, so the two flags don't need retyping each time,
+especially for AWS's paid instance which is meant to be torn down
+promptly after verification. Deliberately does **not** pass
+`-auto-approve` — destroy is the one operation in this whole effort
+where skipping the interactive "type yes" confirmation would be a real
+safety regression, not just friction.
+
+**`PLATFORM` env var + `image_tag` template variable, for the second
+(x86_64) image build.** `scripts/build-and-push-oci.sh`'s hardcoded
+`--platform linux/arm64` became `PLATFORM="${PLATFORM:-linux/arm64}"`
+(zero behavior change for existing OCI/Azure use). All three clouds'
+`cloud-init.yaml.tftpl` (still byte-for-byte identical to each other)
+gained an `IMAGE_TAG=${image_tag}` on the existing `docker compose
+pull`/`up -d` lines; OCI's and Azure's `compute.tf` pass `"latest"`
+(arm64, no behavior change), AWS's passes `"latest-amd64"` — a distinct
+tag on the *same* OCIR registry, not a second registry or pipeline.
+
+**Verified end-to-end for AWS** (2026-11-27): `terraform fmt`/`init`/
+`validate` clean; live `terraform plan` against the real account (scoped
+`claimsfraud-terraform` IAM user, confirmed via `aws sts
+get-caller-identity`) resolved a real AMI ID and planned exactly 8
+resources with 0 errors. **Not yet done**: the x86_64 image build/push,
+`terraform apply`, and the teardown-script exercise itself — those
+remain the next concrete steps, same "verified building block, not yet
+the full round trip" status Azure was left at.
