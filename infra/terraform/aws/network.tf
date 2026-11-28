@@ -24,8 +24,9 @@ resource "aws_route_table" "public" {
 }
 
 resource "aws_subnet" "public" {
-  vpc_id     = aws_vpc.this.id
-  cidr_block = var.subnet_cidr
+  vpc_id            = aws_vpc.this.id
+  cidr_block        = var.subnet_cidr
+  availability_zone = var.availability_zone
   # Belt-and-braces — the instance's own associate_public_ip_address is
   # what actually matters (see compute.tf), but this keeps the subnet
   # itself consistent with being a "public" one.

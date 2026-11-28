@@ -65,6 +65,12 @@ variable "subnet_cidr" {
   default = "10.0.1.0/24"
 }
 
+variable "availability_zone" {
+  type        = string
+  default     = "us-east-1a"
+  description = "Pinned explicitly, not left to AWS's default placement — a real terraform apply landed the subnet in us-east-1e, which doesn't support t3.medium (\"Unsupported: ... not supported in your requested Availability Zone\"; the error listed us-east-1a/b/c/d/f as working). Not every AZ in a region supports every instance type; us-east-1e specifically has a history of more restricted support. If you change aws_region, pick a matching AZ for it too."
+}
+
 # --- Container registry (OCIR, reused — not AWS's own) — see
 # scripts/build-and-push-oci.sh and infra/terraform/oci/README.md
 # "Porting to another cloud". Same names/meaning as the other two

@@ -24,11 +24,22 @@ locals {
   repo_root = "${path.module}/../../.."
 
   deploy_files = {
-    "docker-compose.deploy.yml"                      = "${local.repo_root}/docker-compose.deploy.yml"
-    "docker-compose.deploy.images.yml"               = "${local.repo_root}/docker-compose.deploy.images.yml"
-    "config/tenants.yaml"                            = "${local.repo_root}/config/tenants.yaml"
-    "config/prometheus.docker.yml"                   = "${local.repo_root}/config/prometheus.docker.yml"
-    "config/dag/acme_insurance/auto/claim.fnol.yaml" = "${local.repo_root}/config/dag/acme_insurance/auto/claim.fnol.yaml"
+    # file(), not just the path string — a real bug found live on a
+    # first AWS apply of this exact pattern: without file(), each
+    # "content" below is the bare path string itself, which then gets
+    # base64-encoded and written to the instance as that file's
+    # "content" (e.g. docker-compose.deploy.yml on the VM literally
+    # contained the text "./../../../docker-compose.deploy.yml").
+    # docker compose then failed trying to parse that string as YAML
+    # (`yaml: construct errors: ... cannot construct !!str`). This
+    # directory's own VM hasn't booted yet (Ampere A1 capacity), so this
+    # fix lands here before it ever manifests, not as a live-debugged fix
+    # like AWS's.
+    "docker-compose.deploy.yml"                      = file("${local.repo_root}/docker-compose.deploy.yml")
+    "docker-compose.deploy.images.yml"               = file("${local.repo_root}/docker-compose.deploy.images.yml")
+    "config/tenants.yaml"                            = file("${local.repo_root}/config/tenants.yaml")
+    "config/prometheus.docker.yml"                   = file("${local.repo_root}/config/prometheus.docker.yml")
+    "config/dag/acme_insurance/auto/claim.fnol.yaml" = file("${local.repo_root}/config/dag/acme_insurance/auto/claim.fnol.yaml")
   }
 
   cloud_init = templatefile("${path.module}/cloud-init.yaml.tftpl", {

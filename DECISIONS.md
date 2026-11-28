@@ -877,3 +877,70 @@ resources with 0 errors. **Not yet done**: the x86_64 image build/push,
 `terraform apply`, and the teardown-script exercise itself — those
 remain the next concrete steps, same "verified building block, not yet
 the full round trip" status Azure was left at.
+
+## 23. Full AWS round trip — found and fixed two real bugs the OCI/Azure plans never surfaced
+
+Continues #22 directly: image build/push succeeded (all 7, `:latest-amd64`,
+verified live on OCIR), then `terraform apply` — which is where two real
+bugs surfaced, neither caught by `plan`/`validate` on any of the three
+clouds, because both only manifest once an instance actually boots.
+
+**Bug 1 — `t3.medium` isn't supported in every AZ.** The first `apply`
+failed at `aws_instance.this` with `Unsupported: ... t3.medium ... not
+supported in your requested Availability Zone (us-east-1e)` — AWS had
+auto-placed the subnet in `us-east-1e`, one of `us-east-1`'s more
+restricted AZs, since `aws_subnet.public` left `availability_zone`
+unset. Fixed by adding an explicit `availability_zone` variable
+(default `us-east-1a`, one of the AZs the error itself listed as
+working) rather than leaving placement to chance. Re-running `apply`
+correctly showed only the subnet and its route table association as
+needing replacement (2 destroyed, 3 added) — the VPC, IGW, route table,
+security group, and key pair were untouched, confirming the fix was as
+narrow as intended.
+
+**Bug 2 — real, and present in all three clouds' `compute.tf`, not AWS-
+specific: `locals.deploy_files` stored path strings, not file
+contents.** The instance came up, but `docker compose` failed on
+*every* file with `yaml: construct errors: ... cannot construct !!str`.
+Live debugging on the running instance (`docker compose ... config
+--quiet` failed identically with zero file args beyond a single `-f`,
+ruling out OCIR/credentials entirely) traced it to `cat
+/opt/claimfraud/docker-compose.deploy.yml` literally containing the
+text `./../../../docker-compose.deploy.yml` — the `deploy_files` map in
+`compute.tf` interpolated each value as `"${local.repo_root}/<name>"` (a
+path string) instead of wrapping it in Terraform's `file(...)` function,
+so `cloud-init.yaml.tftpl`'s `base64encode(content)` was faithfully
+encoding the *path*, not the file it pointed to. All 5 shipped files
+(`docker-compose.deploy.yml`, `.deploy.images.yml`, `tenants.yaml`,
+`prometheus.docker.yml`, `claim.fnol.yaml`) had the identical symptom —
+confirmed directly on the instance before writing the fix. **This bug
+was dormant in OCI's and Azure's `compute.tf` too**, written the same
+way when Azure was built from OCI's pattern and AWS from both — neither
+`terraform validate` nor `plan` catches it, since `file()`'s absence is
+syntactically valid HCL that only fails once cloud-init actually tries
+to use the bogus "content" on a real boot. Fixed in all three
+directories' `compute.tf` by wrapping each `deploy_files` value in
+`file(...)`.
+
+**Live-patched the already-running instance directly** (`scp` the real
+files to `/tmp`, `sudo mv` into place, re-run the two `docker compose`
+commands by hand) rather than wait for a destroy/recreate cycle —
+`aws_instance.user_data` changes don't force replacement by default
+(`user_data_replace_on_change = false`), so simply re-`apply`-ing after
+the fix would have updated the stored `user_data` without ever
+re-running cloud-init on the live instance. This got a real, same-
+session verification without burning a second `t3.medium` boot; a
+*fresh* `apply` from a clean account would pick up the fix correctly
+through cloud-init as normal.
+
+**Verified fully end-to-end on AWS** (2026-11-28): first claim after
+`up -d` came back `"status":"degraded"` (`policy_lookup` and the Kafka
+`publish` node both hit `DeadlineExceeded` — the same documented
+cold-connection/JVM-warm-up race as RUNBOOK.md's existing OCI/Azure
+entries, not a new issue), a second claim ~20s later came back
+`"status":"scored"` in 134ms. Prometheus also confirmed reachable
+(`/targets` → 200).
+
+**Not yet done**: `scripts/teardown-cloud.sh aws` itself hasn't been
+exercised yet — still the explicit next step, and the instance should
+not be left running past that given it's real paid compute.
