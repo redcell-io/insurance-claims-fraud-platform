@@ -18,8 +18,17 @@
 write_files:
 %{ for path, content in deploy_files ~}
   - path: /opt/claimfraud/${path}
-    encoding: b64
-    content: ${base64encode(content)}
+    # gz+b64, not plain b64 — found on a real AWS apply: the 5 shipped
+    # files total ~11KB raw, which after base64 inflation (+33%) plus
+    # YAML structural overhead exceeded EC2's hard 16384-byte user_data
+    # limit ("expected length of user_data to be in the range (0 -
+    # 16384)"). Gzip-compressing first (base64gzip(), cloud-init's
+    # native gz+b64 write_files encoding) comfortably clears it for
+    # text/YAML content like this, and is a strict improvement for
+    # OCI/Azure too (smaller payload), so it's applied here rather than
+    # only in a divergent AWS-specific copy.
+    encoding: gz+b64
+    content: ${base64gzip(content)}
     owner: root:root
     permissions: '0644'
 %{ endfor ~}

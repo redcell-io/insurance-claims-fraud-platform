@@ -941,6 +941,41 @@ entries, not a new issue), a second claim ~20s later came back
 `"status":"scored"` in 134ms. Prometheus also confirmed reachable
 (`/targets` → 200).
 
-**Not yet done**: `scripts/teardown-cloud.sh aws` itself hasn't been
-exercised yet — still the explicit next step, and the instance should
-not be left running past that given it's real paid compute.
+**Bug 3 — found immediately after, trying to tear down**: fixing bug 2
+(real file contents instead of path strings) pushed `user_data` over
+EC2's hard **16384-byte limit** — the 5 shipped files total ~11KB raw,
+which after base64 inflation (+33%) plus YAML structural overhead
+exceeded it (`expected length of user_data to be in the range (0 -
+16384)`). This surfaced on `terraform plan -destroy`, not just `apply`
+— Terraform validates the attribute's config value during any plan that
+evaluates it, destroy included. Fixed by gzip-compressing each file
+before base64-encoding (`encoding: gz+b64` + `base64gzip(content)`
+instead of `encoding: b64` + `base64encode(content)` — cloud-init's
+`write_files` module supports gzip natively). Applied to all three
+clouds' `cloud-init.yaml.tftpl`, not just AWS's — text/YAML compresses
+well, so this is a strict size improvement for OCI/Azure too even
+though neither has AWS's specific 16KB ceiling, and keeping the
+template byte-for-byte identical across clouds remains the goal.
+
+**A real, uncomfortable lesson about Terraform and secrets**:
+`terraform plan -destroy`'s error diagnostic for the bug 3 failure
+printed the **full rendered `user_data`, including the OCIR auth token
+and username in plaintext** — unlike a normal create/update plan, which
+redacts `sensitive = true` variables as `(sensitive value)`, an error
+diagnostic tied to that same attribute dumps its real computed value
+for debugging purposes, bypassing the redaction. Hit this twice in the
+same debugging session (once running the preview directly, once via the
+user's own pasted terminal output) before catching it. **Response**:
+flagged immediately both times, recommended rotating the exposed OCIR
+auth token, and switched to having the user run `terraform destroy`
+themselves from their own terminal rather than having it run and
+captured into this conversation. Worth remembering generally: Terraform
+error output is not held to the same sensitive-value redaction as
+successful plan/apply output — an error touching a sensitive attribute
+can expose it even when nothing is misconfigured about `sensitive =
+true` itself.
+
+**Not yet done**: `scripts/teardown-cloud.sh aws` itself hasn't
+completed successfully yet — the two bugs above blocked it mid-session.
+Retrying it is still the explicit next step, and the instance should not
+be left running past that given it's real paid compute.
